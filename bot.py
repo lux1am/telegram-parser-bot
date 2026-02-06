@@ -312,12 +312,14 @@ async def start_parsing(query, user_id: int, groups: List[str]):
         
         for idx, group in enumerate(groups, 1):
             await query.edit_message_text(f"📡 Группа {idx}/{len(groups)}: {group}")
-
+            
             print(f"🎯 Вызываю parse_group для {group}")
-print(f"   Параметры: max={criteria['max_contacts']}, priority={criteria['priority']}, exclude_bots={criteria['exclude_bots']}")
-contacts = await parser.parse_group(group, criteria['max_contacts'], criteria['priority'], criteria['exclude_bots'])
-print(f"📦 parse_group вернул {len(contacts)} контактов")
+            print(f"   Параметры: max={criteria['max_contacts']}, priority={criteria['priority']}, exclude_bots={criteria['exclude_bots']}")
+            
             contacts = await parser.parse_group(group, criteria['max_contacts'], criteria['priority'], criteria['exclude_bots'])
+            
+            print(f"📦 parse_group вернул {len(contacts)} контактов")
+            
             all_contacts.extend(contacts)
             
             await query.edit_message_text(f"✅ {group}: {len(contacts)} контактов\n📊 Всего: {len(all_contacts)}")
@@ -351,7 +353,9 @@ print(f"📦 parse_group вернул {len(contacts)} контактов")
         
     except Exception as e:
         logger.error(f"Parsing error: {e}")
-        print(f"Parsing error: {e}")
+        print(f"❌ КРИТИЧЕСКАЯ ОШИБКА: {e}")
+        import traceback
+        traceback.print_exc()
         await query.edit_message_text(f"❌ Ошибка: {str(e)}")
 
 def main():

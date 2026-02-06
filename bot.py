@@ -295,10 +295,13 @@ async def update_criteria_msg(query, user_id: int):
     await query.edit_message_text(new_text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def start_parsing(query, user_id: int, groups: List[str]):
+    print(f"▶️ START_PARSING вызвана для групп: {groups}")
     await query.edit_message_text("🚀 Начинаю...\n⏳ Подключаюсь...")
     
     try:
+        print(f"📡 Проверяю подключение к Telegram...")
         if not parser.client or not parser.client.is_connected():
+            print(f"⚠️ Клиент не подключен, подключаюсь...")
             if not await parser.connect():
                 await query.edit_message_text("❌ Ошибка подключения!")
                 return
@@ -309,7 +312,11 @@ async def start_parsing(query, user_id: int, groups: List[str]):
         
         for idx, group in enumerate(groups, 1):
             await query.edit_message_text(f"📡 Группа {idx}/{len(groups)}: {group}")
-            
+
+            print(f"🎯 Вызываю parse_group для {group}")
+print(f"   Параметры: max={criteria['max_contacts']}, priority={criteria['priority']}, exclude_bots={criteria['exclude_bots']}")
+contacts = await parser.parse_group(group, criteria['max_contacts'], criteria['priority'], criteria['exclude_bots'])
+print(f"📦 parse_group вернул {len(contacts)} контактов")
             contacts = await parser.parse_group(group, criteria['max_contacts'], criteria['priority'], criteria['exclude_bots'])
             all_contacts.extend(contacts)
             

@@ -141,7 +141,7 @@ class TelegramParser:
             logger.error(f"❌ Telegram error: {e}")
             return False
     
- async def parse_group(self, group_link: str, max_contacts: int, priority: str, exclude_bots: bool) -> List[Dict]:
+    async def parse_group(self, group_link: str, max_contacts: int, priority: str, exclude_bots: bool) -> List[Dict]:
         contacts = []
         try:
             entity = await self.client.get_entity(group_link)
@@ -189,7 +189,7 @@ class TelegramParser:
     async def disconnect(self):
         if self.client:
             await self.client.disconnect()
-
+            
 parser = TelegramParser()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):

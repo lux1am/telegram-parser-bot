@@ -37,8 +37,8 @@ DELAY_MAX = 5
 
 DEFAULT_CRITERIA = {
     'max_contacts': 100,
-    'priority': 'username',
-    'exclude_bots': True,
+    'priority': 'any',
+    'exclude_bots': False,
 }
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -70,9 +70,11 @@ class GoogleSheetsManager:
             self.spreadsheet = self.client.open_by_key(SPREADSHEET_ID)
             self.connected = True
             logger.info("✅ Connected to Google Sheets")
+            print("✅ Connected to Google Sheets")
             return True
         except Exception as e:
             logger.error(f"❌ Google Sheets error: {e}")
+            print(f"❌ Google Sheets error: {e}")
             return False
     
     def write_contacts(self, contacts: List[Dict]):
@@ -97,8 +99,10 @@ class GoogleSheetsManager:
                 rows.append(row)
             sheet.append_rows(rows)
             logger.info(f"✅ Saved {len(contacts)} contacts")
+            print(f"✅ Saved {len(contacts)} contacts")
         except Exception as e:
             logger.error(f"Error saving contacts: {e}")
+            print(f"Error saving contacts: {e}")
     
     def write_stats(self, stats: Dict):
         try:
@@ -136,12 +140,14 @@ class TelegramParser:
             self.client = TelegramClient('bot_session', TELEGRAM_API_ID, TELEGRAM_API_HASH)
             await self.client.start(phone=TELEGRAM_PHONE)
             logger.info("✅ Connected to Telegram")
+            print("✅ Connected to Telegram")
             return True
         except Exception as e:
             logger.error(f"❌ Telegram error: {e}")
+            print(f"❌ Telegram error: {e}")
             return False
     
-async def parse_group(self, group_link: str, max_contacts: int, priority: str, exclude_bots: bool) -> List[Dict]:
+    async def parse_group(self, group_link: str, max_contacts: int, priority: str, exclude_bots: bool) -> List[Dict]:
         contacts = []
         try:
             print(f"🔍 Получаю информацию о {group_link}")
@@ -202,7 +208,7 @@ async def parse_group(self, group_link: str, max_contacts: int, priority: str, e
     async def disconnect(self):
         if self.client:
             await self.client.disconnect()
-            
+
 parser = TelegramParser()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -338,15 +344,14 @@ async def start_parsing(query, user_id: int, groups: List[str]):
         
     except Exception as e:
         logger.error(f"Parsing error: {e}")
+        print(f"Parsing error: {e}")
         await query.edit_message_text(f"❌ Ошибка: {str(e)}")
 
-def main(): 
-    # Декодируем сессию из base64
+def main():
     import subprocess
     subprocess.run(['python', 'decode_session.py'])
     
     print("🔗 Connecting to Google Sheets...")
-    # ... остальной код
     if not sheets_manager.connect():
         print("❌ Google Sheets connection failed!")
         return

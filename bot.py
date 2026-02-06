@@ -141,25 +141,34 @@ class TelegramParser:
             logger.error(f"❌ Telegram error: {e}")
             return False
     
-    async def parse_group(self, group_link: str, max_contacts: int, priority: str, exclude_bots: bool) -> List[Dict]:
+async def parse_group(self, group_link: str, max_contacts: int, priority: str, exclude_bots: bool) -> List[Dict]:
         contacts = []
         try:
+            print(f"🔍 Получаю информацию о {group_link}")
             entity = await self.client.get_entity(group_link)
             
             if hasattr(entity, 'broadcast') and entity.broadcast:
+                print(f"📢 Это канал! Ищу группу обсуждений...")
                 try:
                     from telethon.tl.functions.channels import GetFullChannelRequest
                     full = await self.client(GetFullChannelRequest(channel=entity))
                     
                     if full.full_chat.linked_chat_id:
+                        print(f"✅ Найдена группа обсуждений! ID: {full.full_chat.linked_chat_id}")
                         discussion_group = await self.client.get_entity(full.full_chat.linked_chat_id)
                         entity = discussion_group
                     else:
+                        print(f"❌ У канала НЕТ группы обсуждений")
                         return []
-                except:
+                except Exception as e:
+                    print(f"❌ Ошибка получения группы обсуждений: {e}")
                     return []
+            else:
+                print(f"👥 Это группа (не канал)")
             
+            print(f"📊 Получаю участников (limit={max_contacts * 2})...")
             participants = await self.client.get_participants(entity, limit=max_contacts * 2)
+            print(f"👥 Получено {len(participants)} участников")
             
             for user in participants:
                 if len(contacts) >= max_contacts:
@@ -181,7 +190,11 @@ class TelegramParser:
                 }
                 contacts.append(contact)
                 await asyncio.sleep(0.1)
+            
+            print(f"✅ Отобрано {len(contacts)} контактов после фильтров")
+            
         except Exception as e:
+            print(f"❌ Ошибка парсинга {group_link}: {e}")
             logger.error(f"Error parsing {group_link}: {e}")
         
         return contacts

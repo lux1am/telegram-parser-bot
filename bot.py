@@ -312,8 +312,13 @@ async def start_parsing(query, user_id: int, groups: List[str]):
         logger.error(f"Parsing error: {e}")
         await query.edit_message_text(f"❌ Ошибка: {str(e)}")
 
-def main():
+def main(): 
+    # Декодируем сессию из base64
+    import subprocess
+    subprocess.run(['python', 'decode_session.py'])
+    
     print("🔗 Connecting to Google Sheets...")
+    # ... остальной код
     if not sheets_manager.connect():
         print("❌ Google Sheets connection failed!")
         return

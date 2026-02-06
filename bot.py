@@ -255,6 +255,14 @@ async def parse_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    print(f"🔘 BUTTON CALLBACK: data = {query.data}")  # ← ДОБАВЬ ЭТУ СТРОКУ
+    
+    user_id = update.effective_user.id
+    data = query.data
     user_id = update.effective_user.id
     data = query.data
     

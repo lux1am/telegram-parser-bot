@@ -141,69 +141,50 @@ class TelegramParser:
             logger.error(f"❌ Telegram error: {e}")
             return False
     
-  async def parse_group(self, group_link: str, max_contacts: int, priority: str, exclude_bots: bool) -> List[Dict]:
-    contacts = []
-    try:
-        # Получаем сущность (канал или группа)
-        entity = await self.client.get_entity(group_link)
-        
-        # Если это канал - пытаемся найти группу обсуждений
-        if hasattr(entity, 'broadcast') and entity.broadcast:
-            logger.info(f"📢 Это канал, ищу группу обсуждений...")
+ async def parse_group(self, group_link: str, max_contacts: int, priority: str, exclude_bots: bool) -> List[Dict]:
+        contacts = []
+        try:
+            entity = await self.client.get_entity(group_link)
             
-            # Получаем полную информацию о канале
-            full_channel = await self.client.get_entity(entity)
-            
-            # Проверяем есть ли linked_chat_id (группа обсуждений)
-            try:
-                # Получаем full info
-                from telethon.tl.functions.channels import GetFullChannelRequest
-                full = await self.client(GetFullChannelRequest(channel=entity))
-                
-                if full.full_chat.linked_chat_id:
-                    logger.info(f"✅ Найдена группа обсуждений!")
-                    # Получаем группу обсуждений
-                    discussion_group = await self.client.get_entity(full.full_chat.linked_chat_id)
-                    entity = discussion_group
-                else:
-                    logger.warning(f"⚠️ У канала нет группы обсуждений")
+            if hasattr(entity, 'broadcast') and entity.broadcast:
+                try:
+                    from telethon.tl.functions.channels import GetFullChannelRequest
+                    full = await self.client(GetFullChannelRequest(channel=entity))
+                    
+                    if full.full_chat.linked_chat_id:
+                        discussion_group = await self.client.get_entity(full.full_chat.linked_chat_id)
+                        entity = discussion_group
+                    else:
+                        return []
+                except:
                     return []
-            except Exception as e:
-                logger.warning(f"⚠️ Не удалось получить группу обсуждений: {e}")
-                return []
-        
-        # Получаем участников
-        participants = await self.client.get_participants(entity, limit=max_contacts * 2)
-        
-        logger.info(f"👥 Найдено {len(participants)} участников")
-        
-        for user in participants:
-            if len(contacts) >= max_contacts:
-                break
-            if exclude_bots and user.bot:
-                continue
-            if user.deleted:
-                continue
-            if priority == 'username' and not user.username:
-                continue
             
-            contact = {
-                'id': user.id,
-                'username': f"@{user.username}" if user.username else "",
-                'phone': f"+{user.phone}" if user.phone else "",
-                'first_name': user.first_name or "",
-                'last_name': user.last_name or "",
-                'group': group_link,
-            }
-            contacts.append(contact)
-            await asyncio.sleep(0.1)
+            participants = await self.client.get_participants(entity, limit=max_contacts * 2)
             
-        logger.info(f"✅ Отобрано {len(contacts)} контактов")
+            for user in participants:
+                if len(contacts) >= max_contacts:
+                    break
+                if exclude_bots and user.bot:
+                    continue
+                if user.deleted:
+                    continue
+                if priority == 'username' and not user.username:
+                    continue
+                
+                contact = {
+                    'id': user.id,
+                    'username': f"@{user.username}" if user.username else "",
+                    'phone': f"+{user.phone}" if user.phone else "",
+                    'first_name': user.first_name or "",
+                    'last_name': user.last_name or "",
+                    'group': group_link,
+                }
+                contacts.append(contact)
+                await asyncio.sleep(0.1)
+        except Exception as e:
+            logger.error(f"Error parsing {group_link}: {e}")
         
-    except Exception as e:
-        logger.error(f"❌ Ошибка парсинга {group_link}: {e}")
-    
-    return contacts
+        return contacts
     
     async def disconnect(self):
         if self.client:

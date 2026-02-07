@@ -133,10 +133,11 @@ class TelegramParser:
             print(f"❌ Telegram error: {e}")
             return False
     
-    async def parse_group(self, group_link: str, max_contacts: int, priority: str, exclude_bots: bool) -> List[Dict]:
+async def parse_group(self, group_link: str, max_contacts: int, priority: str, exclude_bots: bool) -> List[Dict]:
         contacts = []
+        print(f"🔍 Получаю информацию о {group_link}")
+        
         try:
-            print(f"🔍 Получаю информацию о {group_link}")
             entity = await self.client.get_entity(group_link)
             
             if hasattr(entity, 'broadcast') and entity.broadcast:
@@ -159,13 +160,15 @@ class TelegramParser:
             
             print(f"📊 Получаю участников (limit={max_contacts * 2})...")
             participants = await self.client.get_participants(entity, limit=max_contacts * 2)
-            print(f"👥 Получено {len(participants)} участников")
+            print(f"👥 Telegram вернул {len(participants)} участников")
             
-for user in participants:
-    if len(contacts) >= max_contacts:
-        break
-    if user.deleted:
-        continue
+            for user in participants:
+                if len(contacts) >= max_contacts:
+                    print(f"⚠️ Достигнут лимит {max_contacts}, останавливаюсь")
+                    break
+                
+                if user.deleted:
+                    continue
                 
                 contact = {
                     'id': user.id,
@@ -176,12 +179,14 @@ for user in participants:
                     'group': group_link,
                 }
                 contacts.append(contact)
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.05)
             
-            print(f"✅ Отобрано {len(contacts)} контактов после фильтров")
+            print(f"✅ Отобрано {len(contacts)} контактов (из {len(participants)} полученных)")
             
         except Exception as e:
-            print(f"❌ Ошибка парсинга {group_link}: {e}")
+            print(f"❌ ОШИБКА парсинга {group_link}: {e}")
+            import traceback
+            traceback.print_exc()
         
         return contacts
     

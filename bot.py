@@ -35,7 +35,7 @@ DELAY_MIN = 2
 DELAY_MAX = 5
 
 DEFAULT_CRITERIA = {
-    'max_contacts': 200,
+    'max_contacts': 10000,
 }
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -153,7 +153,7 @@ class TelegramParser:
                 print(f"👥 Обнаружена ГРУППА")
             
             print(f"📥 Запрашиваю участников (limit={max_contacts})...")
-            participants = await self.client.get_participants(entity, limit=max_contacts)
+           participants = await self.client.get_participants(entity)
             print(f"✅ Telegram вернул {len(participants)} участников")
             
             for idx, user in enumerate(participants, 1):

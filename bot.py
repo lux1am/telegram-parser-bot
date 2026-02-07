@@ -114,10 +114,14 @@ sheets_manager = GoogleSheetsManager()
 class TelegramParser:
     def __init__(self):
         self.client = None
+        self.loop = None
     
     async def connect(self):
         try:
-            self.client = TelegramClient('bot_session', TELEGRAM_API_ID, TELEGRAM_API_HASH)
+            if not self.loop:
+                self.loop = asyncio.new_event_loop()
+            
+            self.client = TelegramClient('bot_session', TELEGRAM_API_ID, TELEGRAM_API_HASH, loop=self.loop)
             await self.client.start(phone=TELEGRAM_PHONE)
             print("✅ Connected to Telegram")
             return True
@@ -152,9 +156,12 @@ class TelegramParser:
             else:
                 print(f"👥 Обнаружена ГРУППА")
             
-            print(f"📥 Запрашиваю участников (limit={max_contacts})...")
-           participants = await self.client.get_participants(entity)
+            print(f"📥 Запрашиваю ВСЕХ участников...")
+            participants = await self.client.get_participants(entity)
             print(f"✅ Telegram вернул {len(participants)} участников")
+            
+            participants = participants[:max_contacts]
+            print(f"📊 Обрабатываю первых {len(participants)} участников")
             
             for idx, user in enumerate(participants, 1):
                 if user.deleted:
@@ -170,7 +177,7 @@ class TelegramParser:
                 }
                 contacts.append(contact)
                 
-                if idx % 50 == 0:
+                if idx % 100 == 0:
                     print(f"   📦 Обработано {idx}/{len(participants)}...")
                 
                 await asyncio.sleep(0.05)
@@ -190,7 +197,10 @@ class TelegramParser:
     
     async def disconnect(self):
         if self.client:
-            await self.client.disconnect()
+            try:
+                await self.client.disconnect()
+            except:
+                pass
 
 parser = TelegramParser()
 
@@ -239,7 +249,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await do_parsing(query, user_id, groups)
     elif data == "adj":
         criteria = get_user_criteria(user_id)
-        new_val = 50 if criteria['max_contacts'] >= 200 else criteria['max_contacts'] + 50
+        new_val = 1000 if criteria['max_contacts'] >= 10000 else criteria['max_contacts'] + 1000
         update_user_criteria(user_id, 'max_contacts', new_val)
         
         text = query.message.text
@@ -267,6 +277,14 @@ async def do_parsing(query, user_id: int, groups: List[str]):
     
     try:
         if not parser.client or not parser.client.is_connected():
+            print("🔄 Переподключаюсь к Telegram...")
+            if parser.client:
+                try:
+                    await parser.client.disconnect()
+                except:
+                    pass
+            parser.client = None
+            
             if not await parser.connect():
                 await query.edit_message_text("❌ Ошибка подключения к Telegram!")
                 return

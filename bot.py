@@ -13,7 +13,6 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 from telethon import TelegramClient
-from telethon.errors import FloodWaitError
 from telethon.tl.functions.channels import GetFullChannelRequest
 
 import gspread
@@ -30,16 +29,13 @@ SPREADSHEET_ID = os.getenv('SPREADSHEET_ID')
 
 SHEET_CONTACTS = "Контакты"
 SHEET_STATS = "Статистика"
-SHEET_LOG = "Лог"
 
 MAX_GROUPS_PER_RUN = 10
 DELAY_MIN = 2
 DELAY_MAX = 5
 
 DEFAULT_CRITERIA = {
-    'max_contacts': 100,
-    'priority': 'any',
-    'exclude_bots': False,
+    'max_contacts': 200,
 }
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -61,7 +57,6 @@ class GoogleSheetsManager:
     def __init__(self):
         self.client = None
         self.spreadsheet = None
-        self.connected = False
     
     def connect(self):
         try:
@@ -69,7 +64,6 @@ class GoogleSheetsManager:
             creds = Credentials.from_service_account_file('credentials.json', scopes=scopes)
             self.client = gspread.authorize(creds)
             self.spreadsheet = self.client.open_by_key(SPREADSHEET_ID)
-            self.connected = True
             print("✅ Connected to Google Sheets")
             return True
         except Exception as e:
@@ -90,16 +84,14 @@ class GoogleSheetsManager:
                     contact.get('first_name', ''),
                     contact.get('last_name', ''),
                     contact.get('group', ''),
-                    0,
-                    '',
-                    '',
+                    0, '', '',
                     datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 ]
                 rows.append(row)
             sheet.append_rows(rows)
-            print(f"✅ Saved {len(contacts)} contacts")
+            print(f"✅ Saved {len(contacts)} contacts to Sheets")
         except Exception as e:
-            print(f"Error saving contacts: {e}")
+            print(f"❌ Error saving contacts: {e}")
     
     def write_stats(self, stats: Dict):
         try:
@@ -111,11 +103,11 @@ class GoogleSheetsManager:
                 stats.get('with_username', 0),
                 stats.get('with_phone', 0),
                 stats.get('duration_sec', 0),
-                stats.get('errors', 0)
+                0
             ]
             sheet.append_row(row)
-        except Exception as e:
-            print(f"Error saving stats: {e}")
+        except:
+            pass
 
 sheets_manager = GoogleSheetsManager()
 
@@ -130,43 +122,41 @@ class TelegramParser:
             print("✅ Connected to Telegram")
             return True
         except Exception as e:
-            print(f"❌ Telegram error: {e}")
+            print(f"❌ Telegram connection error: {e}")
             return False
     
-async def parse_group(self, group_link: str, max_contacts: int, priority: str, exclude_bots: bool) -> List[Dict]:
+    async def parse_group(self, group_link: str, max_contacts: int) -> List[Dict]:
         contacts = []
-        print(f"🔍 Получаю информацию о {group_link}")
+        print(f"\n{'='*50}")
+        print(f"🎯 Парсинг: {group_link}")
+        print(f"📊 Лимит: {max_contacts} контактов")
         
         try:
             entity = await self.client.get_entity(group_link)
+            print(f"✅ Получена сущность: {entity.title if hasattr(entity, 'title') else 'Без названия'}")
             
             if hasattr(entity, 'broadcast') and entity.broadcast:
-                print(f"📢 Это канал! Ищу группу обсуждений...")
+                print(f"📢 Обнаружен КАНАЛ, ищу группу обсуждений...")
                 try:
                     full = await self.client(GetFullChannelRequest(channel=entity))
-                    
                     if full.full_chat.linked_chat_id:
-                        print(f"✅ Найдена группа обсуждений! ID: {full.full_chat.linked_chat_id}")
-                        discussion_group = await self.client.get_entity(full.full_chat.linked_chat_id)
-                        entity = discussion_group
+                        print(f"✅ Найдена группа обсуждений (ID: {full.full_chat.linked_chat_id})")
+                        entity = await self.client.get_entity(full.full_chat.linked_chat_id)
+                        print(f"✅ Переключились на группу: {entity.title if hasattr(entity, 'title') else ''}")
                     else:
-                        print(f"❌ У канала НЕТ группы обсуждений")
+                        print(f"❌ У канала НЕТ привязанной группы обсуждений")
                         return []
                 except Exception as e:
-                    print(f"❌ Ошибка получения группы обсуждений: {e}")
+                    print(f"❌ Ошибка доступа к группе обсуждений: {e}")
                     return []
             else:
-                print(f"👥 Это группа (не канал)")
+                print(f"👥 Обнаружена ГРУППА")
             
-            print(f"📊 Получаю участников (limit={max_contacts * 2})...")
-            participants = await self.client.get_participants(entity, limit=max_contacts * 2)
-            print(f"👥 Telegram вернул {len(participants)} участников")
+            print(f"📥 Запрашиваю участников (limit={max_contacts})...")
+            participants = await self.client.get_participants(entity, limit=max_contacts)
+            print(f"✅ Telegram вернул {len(participants)} участников")
             
-            for user in participants:
-                if len(contacts) >= max_contacts:
-                    print(f"⚠️ Достигнут лимит {max_contacts}, останавливаюсь")
-                    break
-                
+            for idx, user in enumerate(participants, 1):
                 if user.deleted:
                     continue
                 
@@ -179,12 +169,20 @@ async def parse_group(self, group_link: str, max_contacts: int, priority: str, e
                     'group': group_link,
                 }
                 contacts.append(contact)
+                
+                if idx % 50 == 0:
+                    print(f"   📦 Обработано {idx}/{len(participants)}...")
+                
                 await asyncio.sleep(0.05)
             
-            print(f"✅ Отобрано {len(contacts)} контактов (из {len(participants)} полученных)")
+            print(f"✅ ИТОГО собрано: {len(contacts)} контактов")
+            print(f"   • С username: {sum(1 for c in contacts if c['username'])}")
+            print(f"   • С телефоном: {sum(1 for c in contacts if c['phone'])}")
+            print(f"{'='*50}\n")
             
         except Exception as e:
-            print(f"❌ ОШИБКА парсинга {group_link}: {e}")
+            print(f"❌ КРИТИЧЕСКАЯ ОШИБКА при парсинге {group_link}:")
+            print(f"   {type(e).__name__}: {e}")
             import traceback
             traceback.print_exc()
         
@@ -197,14 +195,11 @@ async def parse_group(self, group_link: str, max_contacts: int, priority: str, e
 parser = TelegramParser()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    welcome_text = """👋 Привет!
-
-Я бот для парсинга Telegram групп.
-
-Команда: /parse @groupname
-
-Пример: /parse @durov"""
-    await update.message.reply_text(welcome_text)
+    await update.message.reply_text(
+        "👋 Привет! Я парсер Telegram групп.\n\n"
+        "Команда: /parse @groupname\n"
+        "Пример: /parse @python"
+    )
 
 async def parse_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -217,81 +212,63 @@ async def parse_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     groups = [g.strip() for g in groups_str.replace(',', ' ').split() if g.strip()]
     
     if len(groups) > MAX_GROUPS_PER_RUN:
-        await update.message.reply_text(f"⚠️ Максимум {MAX_GROUPS_PER_RUN} групп за раз!")
+        await update.message.reply_text(f"⚠️ Максимум {MAX_GROUPS_PER_RUN} групп!")
         return
     
     criteria = get_user_criteria(user_id)
-    text = f"""📋 Настройки:
-
-📊 Контактов: {criteria['max_contacts']}
-🎯 Приоритет: {criteria['priority']}
-🤖 Боты: {'исключены' if criteria['exclude_bots'] else 'включены'}
-
-Группы: {', '.join(groups)}"""
     
     keyboard = [
-        [InlineKeyboardButton(f"📊 {criteria['max_contacts']}", callback_data="adjust_max")],
-        [InlineKeyboardButton(f"🤖 Боты: {'OFF' if criteria['exclude_bots'] else 'ON'}", callback_data="toggle_bots")],
-        [InlineKeyboardButton("🚀 ПАРСИТЬ!", callback_data=f"start:{','.join(groups)}")],
+        [InlineKeyboardButton(f"📊 Контактов: {criteria['max_contacts']}", callback_data="adj")],
+        [InlineKeyboardButton("🚀 ПАРСИТЬ!", callback_data=f"go:{','.join(groups)}")],
     ]
     
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text(
+        f"📋 Настройки:\n📊 Макс. контактов: {criteria['max_contacts']}\n\nГруппы: {', '.join(groups)}",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
-    print(f"🔘 BUTTON CALLBACK: data = {query.data}")
-    
     user_id = update.effective_user.id
     data = query.data
     
-    if data.startswith("start:"):
+    if data.startswith("go:"):
         groups_str = data.split(":", 1)[1]
         groups = [g.strip() for g in groups_str.split(',')]
-        await start_parsing(query, user_id, groups)
-    elif data == "adjust_max":
+        await do_parsing(query, user_id, groups)
+    elif data == "adj":
         criteria = get_user_criteria(user_id)
-        new_value = 50 if criteria['max_contacts'] >= 200 else criteria['max_contacts'] + 50
-        update_user_criteria(user_id, 'max_contacts', new_value)
-        await update_criteria_msg(query, user_id)
-    elif data == "toggle_bots":
-        criteria = get_user_criteria(user_id)
-        update_user_criteria(user_id, 'exclude_bots', not criteria['exclude_bots'])
-        await update_criteria_msg(query, user_id)
+        new_val = 50 if criteria['max_contacts'] >= 200 else criteria['max_contacts'] + 50
+        update_user_criteria(user_id, 'max_contacts', new_val)
+        
+        text = query.message.text
+        groups_line = [l for l in text.split('\n') if 'Группы:' in l]
+        groups_str = groups_line[0].split(':', 1)[1].strip() if groups_line else ""
+        
+        keyboard = [
+            [InlineKeyboardButton(f"📊 Контактов: {new_val}", callback_data="adj")],
+            [InlineKeyboardButton("🚀 ПАРСИТЬ!", callback_data=f"go:{groups_str}")],
+        ]
+        
+        await query.edit_message_text(
+            f"📋 Настройки:\n📊 Макс. контактов: {new_val}\n\nГруппы: {groups_str}",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
-async def update_criteria_msg(query, user_id: int):
-    criteria = get_user_criteria(user_id)
-    text = query.message.text
-    groups_line = [line for line in text.split('\n') if 'Группы:' in line]
-    groups_str = groups_line[0].split(':', 1)[1].strip() if groups_line else ""
+async def do_parsing(query, user_id: int, groups: List[str]):
+    print(f"\n{'#'*60}")
+    print(f"🚀 НАЧАЛО ПАРСИНГА")
+    print(f"👤 User ID: {user_id}")
+    print(f"📝 Групп: {len(groups)}")
+    print(f"{'#'*60}\n")
     
-    new_text = f"""📋 Настройки:
-
-📊 Контактов: {criteria['max_contacts']}
-🎯 Приоритет: {criteria['priority']}
-🤖 Боты: {'исключены' if criteria['exclude_bots'] else 'включены'}
-
-Группы: {groups_str}"""
-    
-    keyboard = [
-        [InlineKeyboardButton(f"📊 {criteria['max_contacts']}", callback_data="adjust_max")],
-        [InlineKeyboardButton(f"🤖 Боты: {'OFF' if criteria['exclude_bots'] else 'ON'}", callback_data="toggle_bots")],
-        [InlineKeyboardButton("🚀 ПАРСИТЬ!", callback_data=f"start:{groups_str}")],
-    ]
-    
-    await query.edit_message_text(new_text, reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def start_parsing(query, user_id: int, groups: List[str]):
-    print(f"▶️ START_PARSING вызвана для групп: {groups}")
-    await query.edit_message_text("🚀 Начинаю...\n⏳ Подключаюсь...")
+    await query.edit_message_text("🚀 Подключаюсь к Telegram...")
     
     try:
-        print(f"📡 Проверяю подключение к Telegram...")
         if not parser.client or not parser.client.is_connected():
-            print(f"⚠️ Клиент не подключен, подключаюсь...")
             if not await parser.connect():
-                await query.edit_message_text("❌ Ошибка подключения!")
+                await query.edit_message_text("❌ Ошибка подключения к Telegram!")
                 return
         
         criteria = get_user_criteria(user_id)
@@ -299,22 +276,20 @@ async def start_parsing(query, user_id: int, groups: List[str]):
         start_time = time.time()
         
         for idx, group in enumerate(groups, 1):
-            await query.edit_message_text(f"📡 Группа {idx}/{len(groups)}: {group}")
+            await query.edit_message_text(f"📡 Парсинг {idx}/{len(groups)}: {group}...")
             
-            print(f"🎯 Вызываю parse_group для {group}")
-            print(f"   Параметры: max={criteria['max_contacts']}, priority={criteria['priority']}, exclude_bots={criteria['exclude_bots']}")
-            
-            contacts = await parser.parse_group(group, criteria['max_contacts'], criteria['priority'], criteria['exclude_bots'])
-            
-            print(f"📦 parse_group вернул {len(contacts)} контактов")
-            
+            contacts = await parser.parse_group(group, criteria['max_contacts'])
             all_contacts.extend(contacts)
             
-            await query.edit_message_text(f"✅ {group}: {len(contacts)} контактов\n📊 Всего: {len(all_contacts)}")
-            await asyncio.sleep(random.uniform(DELAY_MIN, DELAY_MAX))
+            await query.edit_message_text(
+                f"✅ {group}: {len(contacts)} контактов\n📊 Всего: {len(all_contacts)}"
+            )
+            
+            if idx < len(groups):
+                await asyncio.sleep(random.uniform(DELAY_MIN, DELAY_MAX))
         
         if all_contacts:
-            await query.edit_message_text("💾 Сохраняю...")
+            await query.edit_message_text("💾 Сохраняю в Google Sheets...")
             sheets_manager.write_contacts(all_contacts)
             
             stats = {
@@ -323,45 +298,55 @@ async def start_parsing(query, user_id: int, groups: List[str]):
                 'with_username': sum(1 for c in all_contacts if c.get('username')),
                 'with_phone': sum(1 for c in all_contacts if c.get('phone')),
                 'duration_sec': int(time.time() - start_time),
-                'errors': 0
             }
             sheets_manager.write_stats(stats)
         
-        result = f"""✅ Готово!
-
-📊 Результаты:
-- Групп: {len(groups)}
-- Контактов: {len(all_contacts)}
-- Username: {sum(1 for c in all_contacts if c.get('username'))}
-- Телефон: {sum(1 for c in all_contacts if c.get('phone'))}
-
-📋 Данные в Google Sheets!"""
+        result = (
+            f"✅ Парсинг завершён!\n\n"
+            f"📊 Результаты:\n"
+            f"• Групп: {len(groups)}\n"
+            f"• Контактов: {len(all_contacts)}\n"
+            f"• С username: {sum(1 for c in all_contacts if c.get('username'))}\n"
+            f"• С телефоном: {sum(1 for c in all_contacts if c.get('phone'))}\n\n"
+            f"📋 Данные в Google Sheets!"
+        )
         
         await query.edit_message_text(result)
         
+        print(f"\n{'#'*60}")
+        print(f"✅ ПАРСИНГ ЗАВЕРШЁН УСПЕШНО")
+        print(f"📊 Собрано: {len(all_contacts)} контактов")
+        print(f"{'#'*60}\n")
+        
     except Exception as e:
-        print(f"❌ КРИТИЧЕСКАЯ ОШИБКА: {e}")
+        print(f"\n{'!'*60}")
+        print(f"❌ КРИТИЧЕСКАЯ ОШИБКА В do_parsing:")
+        print(f"   {type(e).__name__}: {e}")
+        print(f"{'!'*60}\n")
         import traceback
         traceback.print_exc()
         await query.edit_message_text(f"❌ Ошибка: {str(e)}")
 
 def main():
     import subprocess
-    subprocess.run(['python', 'decode_session.py'])
+    subprocess.run(['python', 'decode_session.py'], check=False)
     
+    print("\n" + "="*60)
     print("🔗 Connecting to Google Sheets...")
     if not sheets_manager.connect():
-        print("❌ Google Sheets connection failed!")
+        print("❌ Failed to connect to Google Sheets!")
         return
     
-    print("🤖 Starting bot...")
+    print("🤖 Starting Telegram bot...")
     app = Application.builder().token(BOT_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("parse", parse_command))
     app.add_handler(CallbackQueryHandler(button_callback))
     
-    print("✅ Bot started!")
+    print("✅ Bot is running!")
+    print("="*60 + "\n")
+    
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":

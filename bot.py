@@ -161,15 +161,11 @@ class TelegramParser:
             participants = await self.client.get_participants(entity, limit=max_contacts * 2)
             print(f"👥 Получено {len(participants)} участников")
             
-            for user in participants:
-                if len(contacts) >= max_contacts:
-                    break
-                if exclude_bots and user.bot:
-                    continue
-                if user.deleted:
-                    continue
-                if priority == 'username' and not user.username:
-                    continue
+for user in participants:
+    if len(contacts) >= max_contacts:
+        break
+    if user.deleted:
+        continue
                 
                 contact = {
                     'id': user.id,

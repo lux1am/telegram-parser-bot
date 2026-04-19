@@ -534,7 +534,7 @@ async def do_parsing(query, user_id: int, groups: List[str]):
 # MAIN
 # ─────────────────────────────────────────────
 
-def main():
+def _run_bot_polling():
     logger.info("=" * 60)
     logger.info("🔗 Connecting to Google Sheets...")
     if not sheets_manager.connect():
@@ -571,5 +571,9 @@ def main():
     )
 
 
+async def bot_main():
+    await asyncio.to_thread(_run_bot_polling)
+
+
 if __name__ == "__main__":
-    main()
+    asyncio.run(bot_main())

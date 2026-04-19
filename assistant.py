@@ -205,7 +205,7 @@ async def notify_owner_hot(
         logger.exception("Failed to notify owner for user_id=%s: %s", uid, e)
 
 
-async def main() -> None:
+async def assistant_main() -> None:
     _require_env()
     owner_id = _owner_chat_id()
     api_id = int(TELEGRAM_API_ID_RAW or "0")
@@ -294,7 +294,7 @@ async def main() -> None:
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        asyncio.run(assistant_main())
     except KeyboardInterrupt:
         logger.info("Interrupted")
     except Exception as e:

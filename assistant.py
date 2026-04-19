@@ -12,6 +12,7 @@ import logging
 import os
 import random
 import sys
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -19,6 +20,7 @@ from dotenv import load_dotenv
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.types import User
+from bot import stopped_users, sheets_manager
 
 load_dotenv()
 
@@ -78,6 +80,7 @@ SYSTEM_PERSONA = """Ты — Александр Гребенщиков. Авто
 
 # user_id -> list of {"role": "user"|"assistant", "content": str}
 conversations: Dict[int, List[Dict[str, str]]] = {}
+COLD_MARKERS = ["не интересно", "не надо", "отписка", "стоп", "не актуально", "не нужно", "отстань"]
 
 
 def _require_env() -> None:
@@ -135,6 +138,65 @@ async def load_history_from_telegram(client, uid: int, my_id: int, limit: int = 
         logger.warning(f"Could not load history for user_id={uid}: {e}")
 
 
+def load_history_from_sheets(uid: int, limit: int = 20):
+    try:
+        sheet = sheets_manager.spreadsheet.worksheet("История")
+        rows = sheet.get_all_values()
+        if len(rows) <= 1:
+            return
+        selected = []
+        for row in rows[1:]:
+            if len(row) < 5:
+                continue
+            if row[0].strip() == str(uid):
+                selected.append(row)
+        if not selected:
+            return
+        selected = selected[-limit:]
+        conversations[uid] = [{"role": r[2], "content": r[3]} for r in selected]
+        logger.info("Loaded %s messages from Sheets history for user_id=%s", len(selected), uid)
+    except Exception as e:
+        logger.warning("Could not load history from sheets for user_id=%s: %s", uid, e)
+
+
+def save_history_to_sheets(uid: int, username: str, conv: Dict[int, List[Dict[str, str]]]):
+    try:
+        sheet = sheets_manager.spreadsheet.worksheet("История")
+    except Exception:
+        try:
+            sheet = sheets_manager.spreadsheet.add_worksheet(title="История", rows=2000, cols=5)
+            sheet.append_row(["user_id", "username", "role", "content", "timestamp"])
+        except Exception as e:
+            logger.warning("Could not prepare history sheet: %s", e)
+            return
+
+    try:
+        recent = conv.get(uid, [])[-20:]
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        rows = [[str(uid), username, m.get("role", ""), m.get("content", ""), timestamp] for m in recent]
+        if rows:
+            sheet.append_rows(rows, value_input_option="USER_ENTERED")
+    except Exception as e:
+        logger.warning("Could not save history to sheets for user_id=%s: %s", uid, e)
+
+
+def get_group_context(username: str) -> str:
+    if not username:
+        return ""
+    try:
+        sheet = sheets_manager.spreadsheet.worksheet("Контакты")
+        cell = sheet.find(f"@{username}")
+        if not cell:
+            return ""
+        row = sheet.row_values(cell.row)
+        group_name = row[4] if len(row) > 4 else ""
+        if group_name:
+            return f"\n\nЛид из группы: {group_name}"
+    except Exception as e:
+        logger.warning("Could not fetch group context for @%s: %s", username, e)
+    return ""
+
+
 def _messages_to_gemini_contents(
     messages: List[Dict[str, str]],
 ) -> List[Dict[str, Any]]:
@@ -187,11 +249,11 @@ async def gemini_generate_content(
     return "".join(texts).strip()
 
 
-async def generate_reply(http: httpx.AsyncClient, uid: int) -> str:
+async def generate_reply(http: httpx.AsyncClient, uid: int, group_context: str = "") -> str:
     msgs = conversations.get(uid, [])
     return await gemini_generate_content(
         http,
-        system_instruction=SYSTEM_PERSONA,
+        system_instruction=SYSTEM_PERSONA + group_context,
         conversation_messages=msgs,
         max_output_tokens=MAX_TOKENS_REPLY,
     )
@@ -298,7 +360,13 @@ async def assistant_main() -> None:
                         return
 
                     uid = sender.id
+                    if uid in stopped_users:
+                        logger.info("Skipping stopped user uid=%s", uid)
+                        return
+
                     await load_history_from_telegram(client, uid, my_id)
+                    if not conversations.get(uid):
+                        load_history_from_sheets(uid)
                     text = msg.text.strip()
                     if not text:
                         return
@@ -311,9 +379,20 @@ async def assistant_main() -> None:
                     _trim_history(uid)
 
                     try:
-                        reply = await generate_reply(http, uid)
+                        group_context = get_group_context(sender.username or "")
+                        reply = await generate_reply(http, uid, group_context=group_context)
                     except Exception as e:
                         logger.exception("Gemini reply failed for user_id=%s: %s", uid, e)
+                        if owner_id is not None:
+                            try:
+                                await client.send_message(
+                                    owner_id,
+                                    f"⚠️ Ассистент не смог ответить @{sender.username or uid}\n"
+                                    f"Ошибка: {e}\n"
+                                    "Напиши сам!",
+                                )
+                            except Exception:
+                                pass
                         return
 
                     if not reply:
@@ -322,6 +401,7 @@ async def assistant_main() -> None:
 
                     conversations[uid].append({"role": "assistant", "content": reply})
                     _trim_history(uid)
+                    save_history_to_sheets(uid, sender.username or "", conversations)
 
                     try:
                         # Случайная пауза перед ответом (имитация человека)
@@ -344,6 +424,28 @@ async def assistant_main() -> None:
                         temperature = "NORMAL"
 
                     logger.info("Lead temperature user_id=%s -> %s", uid, temperature)
+
+                    text_l = text.lower()
+                    if any(marker in text_l for marker in COLD_MARKERS):
+                        stopped_users.add(uid)
+                        try:
+                            sheet = sheets_manager.spreadsheet.worksheet("Контакты")
+                            if sender.username:
+                                cell = sheet.find(f"@{sender.username}")
+                                if cell:
+                                    sheet.update_cell(cell.row, 7, "COLD")
+                        except Exception as e:
+                            logger.warning("Could not set COLD status for user_id=%s: %s", uid, e)
+
+                        if owner_id is not None:
+                            try:
+                                await client.send_message(
+                                    owner_id,
+                                    f"❄️ @{sender.username or uid} отказал. Диалог остановлен.",
+                                )
+                            except Exception as e:
+                                logger.warning("Could not notify owner about COLD lead: %s", e)
+                        return
 
                     if temperature == "HOT" and owner_id is not None:
                         await notify_owner_hot(client, owner_id, sender, uid)

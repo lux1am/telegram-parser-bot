@@ -8,8 +8,9 @@ import time
 import random
 import logging
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict
+import pytz
 
 from aiohttp import web
 
@@ -19,6 +20,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.functions.channels import GetFullChannelRequest
+from telethon.errors import UserPrivacyRestrictedError, FloodWaitError, UserIsBlockedError
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -32,6 +34,7 @@ TELEGRAM_API_HASH = os.getenv('TELEGRAM_API_HASH')
 TELEGRAM_PHONE = os.getenv('TELEGRAM_PHONE')
 SPREADSHEET_ID = os.getenv('SPREADSHEET_ID')
 STRING_SESSION = os.getenv('STRING_SESSION')
+OWNER_CHAT_ID = os.getenv("OWNER_CHAT_ID")
 
 SHEET_CONTACTS = "Контакты"
 SHEET_STATS = "Статистика"
@@ -54,6 +57,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 user_data = {}
+stopped_users = set()
 
 
 def get_user_criteria(user_id: int) -> Dict:
@@ -66,6 +70,44 @@ def update_user_criteria(user_id: int, key: str, value):
     if user_id not in user_data:
         user_data[user_id] = DEFAULT_CRITERIA.copy()
     user_data[user_id][key] = value
+
+
+def _parse_date_safe(value: str):
+    if not value:
+        return None
+    value = value.strip()
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d", "%d.%m.%Y %H:%M", "%d.%m.%Y"):
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _today_outreach_count() -> int:
+    try:
+        sheet = sheets_manager.spreadsheet.worksheet("Контакты")
+        rows = sheet.get_all_values()
+        if len(rows) <= 1:
+            return 0
+        today = datetime.now(pytz.timezone("Europe/Moscow")).date()
+        total = 0
+        for row in rows[1:]:
+            status = row[6].strip() if len(row) > 6 else ""
+            if status != "Написали":
+                continue
+            date_str = ""
+            if len(row) > 7 and row[7].strip():
+                date_str = row[7].strip()
+            elif len(row) > 5 and row[5].strip():
+                date_str = row[5].strip()
+            dt = _parse_date_safe(date_str)
+            if dt and dt.date() == today:
+                total += 1
+        return total
+    except Exception as e:
+        logger.warning(f"Could not count today's outreach: {e}")
+        return 0
 
 
 # ─────────────────────────────────────────────
@@ -380,6 +422,302 @@ async def parse_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def outreach_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    if not context.args:
+        await update.message.reply_text(
+            "Использование: /outreach @username\n"
+            "Пример: /outreach @ivanov_business"
+        )
+        return
+
+    username = context.args[0].replace("@", "").strip()
+    if not username:
+        await update.message.reply_text("❌ Укажи username")
+        return
+
+    # Проверка времени — только с 9 до 21 МСК
+    moscow_tz = pytz.timezone('Europe/Moscow')
+    now = datetime.now(moscow_tz)
+    hour = now.hour
+    if hour < 9 or hour >= 21:
+        await update.message.reply_text(
+            f"⏰ Сейчас {hour}:00 МСК. Outreach работает с 9:00 до 21:00."
+        )
+        return
+
+    today_count = _today_outreach_count()
+    if today_count >= 5:
+        await update.message.reply_text("⛔ Лимит на сегодня исчерпан (5/5). Попробуй завтра.")
+        return
+
+    try:
+        sheet = sheets_manager.spreadsheet.worksheet("Контакты")
+        cell = sheet.find(f"@{username}")
+        if cell:
+            # Проверяем колонку 7 (Статус)
+            status = sheet.cell(cell.row, 7).value
+            if status in ["Написали", "Диалог", "Горячий"]:
+                await update.message.reply_text(
+                    f"⚠️ @{username} уже в работе. Статус: {status}\n"
+                    f"Пропускаю."
+                )
+                return
+    except Exception as e:
+        logger.warning(f"Could not check status for @{username}: {e}")
+
+    await update.message.reply_text(f"⏳ Готовлю сообщение для @{username}...")
+
+    # Генерируем первое сообщение через Gemini
+    try:
+        import httpx
+        gemini_url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            "gemini-2.5-flash:generateContent"
+        )
+        gemini_key = os.getenv("GEMINI_API_KEY")
+
+        prompt = (
+            "Напиши первое сообщение незнакомому человеку в Telegram. "
+            "Ты — Александр Гребенщиков, занимаешься автоматизацией бизнеса с ИИ. "
+            "Увидел человека в Telegram-сообществе по бизнесу. "
+            "Цель: узнать чем занимается, завязать разговор. "
+            "Требования: максимум 2 предложения, нейтральный тон, без продажи, "
+            "без представления своих услуг, просто человеческий вопрос. "
+            "Обращение на ВЫ. Никаких смайлов."
+        )
+
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {"maxOutputTokens": 100}
+        }
+
+        async with httpx.AsyncClient() as http:
+            resp = await http.post(
+                gemini_url,
+                params={"key": gemini_key},
+                json=payload,
+                timeout=30.0
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            first_message = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+    except Exception as e:
+        logger.error(f"Gemini outreach error: {e}")
+        await update.message.reply_text(f"❌ Ошибка генерации сообщения: {e}")
+        return
+
+    # Отправляем через продажный аккаунт Telethon
+    sales_client = None
+    try:
+        from telethon import TelegramClient
+        from telethon.sessions import StringSession
+
+        sales_session = os.getenv("STRING_SESSION_SALES")
+        api_id = int(os.getenv("TELEGRAM_API_ID"))
+        api_hash = os.getenv("TELEGRAM_API_HASH")
+
+        sales_client = TelegramClient(
+            StringSession(sales_session),
+            api_id,
+            api_hash
+        )
+
+        await sales_client.connect()
+
+        if not await sales_client.is_user_authorized():
+            await update.message.reply_text("❌ Продажный аккаунт не авторизован")
+            await sales_client.disconnect()
+            return
+
+        # Задержка перед отправкой
+        import random
+        delay = random.uniform(5, 15)
+        await asyncio.sleep(delay)
+
+        # Статус "печатает"
+        async with sales_client.action(username, 'typing'):
+            await asyncio.sleep(random.uniform(3, 6))
+
+        # Отправляем сообщение
+        await sales_client.send_message(username, first_message)
+        await sales_client.disconnect()
+
+        logger.info(f"Outreach sent to @{username}: {first_message}")
+
+    except UserPrivacyRestrictedError:
+        await update.message.reply_text(f"⚠️ @{username} закрыл личку")
+        if sales_client:
+            await sales_client.disconnect()
+        return
+    except FloodWaitError as e:
+        await update.message.reply_text(f"⏳ Telegram просит подождать {e.seconds} секунд")
+        if sales_client:
+            await sales_client.disconnect()
+        return
+    except UserIsBlockedError:
+        await update.message.reply_text(f"🚫 @{username} заблокировал аккаунт")
+        if sales_client:
+            await sales_client.disconnect()
+        return
+    except Exception as e:
+        logger.error(f"Telegram outreach error: {e}")
+        await update.message.reply_text(f"❌ Ошибка отправки: {e}")
+        if sales_client:
+            await sales_client.disconnect()
+        return
+
+    # Записываем в Google Sheets
+    try:
+        sheet = sheets_manager.spreadsheet.worksheet("Контакты")
+        # Ищем строку с этим username и обновляем статус
+        cell = sheet.find(f"@{username}")
+        if cell:
+            sheet.update_cell(cell.row, 7, "Написали")
+            sheet.update_cell(cell.row, 8, datetime.now().strftime('%Y-%m-%d %H:%M'))
+        logger.info(f"Updated sheets status for @{username}")
+    except Exception as e:
+        logger.warning(f"Could not update sheets for @{username}: {e}")
+
+    # Подтверждение тебе
+    await update.message.reply_text(
+        f"✅ Написал @{username}\n\n"
+        f"Сообщение:\n{first_message}\n\n"
+        f"Жду ответа — ассистент подхватит диалог автоматически."
+    )
+
+
+async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Использование: /stop @username")
+        return
+    username = context.args[0].replace("@", "").strip()
+    if not username:
+        await update.message.reply_text("❌ Укажи username")
+        return
+
+    try:
+        sales_client = TelegramClient(
+            StringSession(os.getenv("STRING_SESSION_SALES")),
+            int(os.getenv("TELEGRAM_API_ID")),
+            os.getenv("TELEGRAM_API_HASH"),
+        )
+        await sales_client.connect()
+        entity = await sales_client.get_entity(username)
+        stopped_users.add(entity.id)
+        await sales_client.disconnect()
+    except Exception as e:
+        logger.warning(f"Could not resolve user id for @{username}: {e}")
+
+    try:
+        sheet = sheets_manager.spreadsheet.worksheet("Контакты")
+        cell = sheet.find(f"@{username}")
+        if cell:
+            sheet.update_cell(cell.row, 7, "Остановлен")
+    except Exception as e:
+        logger.warning(f"Could not update stop status for @{username}: {e}")
+
+    await update.message.reply_text(
+        f"⏸ Ассистент остановлен для @{username}. Теперь можешь писать сам."
+    )
+
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Использование: /status @username")
+        return
+    username = context.args[0].replace("@", "").strip()
+    if not username:
+        await update.message.reply_text("❌ Укажи username")
+        return
+
+    status = "Не найден"
+    first_date = "—"
+    group = "—"
+    try:
+        sheet = sheets_manager.spreadsheet.worksheet("Контакты")
+        cell = sheet.find(f"@{username}")
+        if cell:
+            row = sheet.row_values(cell.row)
+            status = row[6] if len(row) > 6 and row[6] else "—"
+            first_date = row[5] if len(row) > 5 and row[5] else "—"
+            group = row[4] if len(row) > 4 and row[4] else "—"
+    except Exception as e:
+        logger.warning(f"Could not load status for @{username}: {e}")
+
+    memory_lines = "—"
+    try:
+        from assistant import conversations
+        sales_client = TelegramClient(
+            StringSession(os.getenv("STRING_SESSION_SALES")),
+            int(os.getenv("TELEGRAM_API_ID")),
+            os.getenv("TELEGRAM_API_HASH"),
+        )
+        await sales_client.connect()
+        entity = await sales_client.get_entity(username)
+        uid = entity.id
+        await sales_client.disconnect()
+        recent = conversations.get(uid, [])[-5:]
+        if recent:
+            memory_lines = "\n".join([f"{m.get('role')}: {m.get('content')}" for m in recent])
+    except Exception as e:
+        logger.warning(f"Could not read in-memory conversations for @{username}: {e}")
+
+    temperature = "HOT" if status == "Горячий" else "NORMAL"
+    await update.message.reply_text(
+        f"@{username}\n"
+        f"Статус: {status}\n"
+        f"Дата первого контакта: {first_date}\n"
+        f"Группа: {group}\n"
+        f"Температура: {temperature}\n\n"
+        f"Последние 5 сообщений:\n{memory_lines}"
+    )
+
+
+async def send_morning_digest(app: Application):
+    moscow_tz = pytz.timezone("Europe/Moscow")
+    while True:
+        now = datetime.now(moscow_tz)
+        target = now.replace(hour=9, minute=0, second=0, microsecond=0)
+        if now >= target:
+            target = target + timedelta(days=1)
+        await asyncio.sleep((target - now).total_seconds())
+
+        try:
+            sheet = sheets_manager.spreadsheet.worksheet("Контакты")
+            rows = sheet.get_all_values()[1:]
+            week_ago = datetime.now(moscow_tz).date() - timedelta(days=7)
+            active_dialogs = 0
+            hot_week = 0
+            sent_week = 0
+            for row in rows:
+                status = row[6].strip() if len(row) > 6 else ""
+                date_str = row[7].strip() if len(row) > 7 else (row[5].strip() if len(row) > 5 else "")
+                dt = _parse_date_safe(date_str)
+                if status == "Диалог":
+                    active_dialogs += 1
+                if dt and dt.date() >= week_ago:
+                    if status == "Горячий":
+                        hot_week += 1
+                    if status == "Написали":
+                        sent_week += 1
+
+            if OWNER_CHAT_ID:
+                await app.bot.send_message(
+                    chat_id=int(OWNER_CHAT_ID),
+                    text=(
+                        "📊 Утренний отчёт:\n"
+                        f"💬 Активных диалогов: {active_dialogs}\n"
+                        f"🔥 Горячих за неделю: {hot_week}\n"
+                        f"📤 Написали всего: {sent_week}"
+                    ),
+                )
+        except Exception as e:
+            logger.warning(f"Morning digest failed: {e}")
+
+
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -534,13 +872,23 @@ async def do_parsing(query, user_id: int, groups: List[str]):
 # ─────────────────────────────────────────────
 
 async def bot_main():
+    if not sheets_manager.connect():
+        logger.error("❌ Failed to connect to Google Sheets!")
+        return
+    web_thread = threading.Thread(target=_run_web_server, daemon=True)
+    web_thread.start()
+
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("parse", parse_command))
+    app.add_handler(CommandHandler("outreach", outreach_command))
+    app.add_handler(CommandHandler("stop", stop_command))
+    app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CallbackQueryHandler(button_callback))
 
     async with app:
         await app.start()
+        asyncio.create_task(send_morning_digest(app))
         await app.updater.start_polling(
             drop_pending_updates=True,
             allowed_updates=Update.ALL_TYPES
@@ -548,5 +896,4 @@ async def bot_main():
         await asyncio.Event().wait()
 
 
-if __name__ == "__main__":
-    asyncio.run(bot_main())
+

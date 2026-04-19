@@ -534,32 +534,18 @@ async def do_parsing(query, user_id: int, groups: List[str]):
 # ─────────────────────────────────────────────
 
 async def bot_main():
-    logger.info("=" * 60)
-    logger.info("🔗 Connecting to Google Sheets...")
-    if not sheets_manager.connect():
-        logger.error("❌ Failed to connect to Google Sheets!")
-        return
-
-    web_thread = threading.Thread(target=_run_web_server, daemon=True)
-    web_thread.start()
-
-    logger.info("🤖 Starting Telegram bot...")
     app = Application.builder().token(BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("parse", parse_command))
     app.add_handler(CallbackQueryHandler(button_callback))
 
-    logger.info("✅ Bot is running and ready!")
-    logger.info("=" * 60)
-
-    await asyncio.to_thread(
-        app.run_polling,
-        drop_pending_updates=True,
-        timeout=20,
-        allowed_updates=Update.ALL_TYPES,
-        close_loop=False,
-    )
+    async with app:
+        await app.start()
+        await app.updater.start_polling(
+            drop_pending_updates=True,
+            allowed_updates=Update.ALL_TYPES
+        )
+        await asyncio.Event().wait()
 
 
 if __name__ == "__main__":

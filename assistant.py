@@ -82,6 +82,29 @@ def _trim_history(uid: int) -> None:
         conversations[uid] = hist[-max_msgs:]
 
 
+async def load_history_from_telegram(client, uid: int, my_id: int, limit: int = 20):
+    """Загружает последние сообщения диалога из Telegram в память"""
+    if uid in conversations and len(conversations[uid]) > 0:
+        return  # история уже есть, не перезагружаем
+
+    try:
+        messages = []
+        async for msg in client.iter_messages(uid, limit=limit):
+            if not msg.text:
+                continue
+            role = "assistant" if msg.out else "user"
+            messages.append({"role": role, "content": msg.text})
+
+        # Разворачиваем — iter_messages идёт от новых к старым
+        messages.reverse()
+
+        if messages:
+            conversations[uid] = messages
+            logger.info(f"Loaded {len(messages)} messages from Telegram history for user_id={uid}")
+    except Exception as e:
+        logger.warning(f"Could not load history for user_id={uid}: {e}")
+
+
 def _messages_to_gemini_contents(
     messages: List[Dict[str, str]],
 ) -> List[Dict[str, Any]]:
@@ -245,6 +268,7 @@ async def assistant_main() -> None:
                         return
 
                     uid = sender.id
+                    await load_history_from_telegram(client, uid, my_id)
                     text = msg.text.strip()
                     if not text:
                         return

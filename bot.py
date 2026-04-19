@@ -103,23 +103,37 @@ class GoogleSheetsManager:
 
     def connect(self):
         try:
-            scopes = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
+            scopes = [
+                'https://www.googleapis.com/auth/spreadsheets',
+                'https://www.googleapis.com/auth/drive'
+            ]
             creds = Credentials.from_service_account_file('credentials.json', scopes=scopes)
             self.client = gspread.authorize(creds)
             self.spreadsheet = self.client.open_by_key(SPREADSHEET_ID)
 
-            # ← ДИАГНОСТИКА: показываем реальные названия листов в таблице
             worksheets = self.spreadsheet.worksheets()
             real_names = [ws.title for ws in worksheets]
             logger.info(f"✅ Connected to Google Sheets: '{self.spreadsheet.title}'")
-            logger.info(f"📋 Реальные названия листов в таблице: {real_names}")
-            logger.info(f"🔍 Ищем лист контактов: '{SHEET_CONTACTS}' — {'✅ НАЙДЕН' if SHEET_CONTACTS in real_names else '❌ НЕ НАЙДЕН'}")
-            logger.info(f"🔍 Ищем лист статистики: '{SHEET_STATS}' — {'✅ НАЙДЕН' if SHEET_STATS in real_names else '❌ НЕ НАЙДЕН'}")
-
+            logger.info(f"📋 Листы в таблице: {real_names}")
+            logger.info(f"🔍 Лист контактов '{SHEET_CONTACTS}': {'✅ НАЙДЕН' if SHEET_CONTACTS in real_names else '❌ НЕ НАЙДЕН'}")
+            logger.info(f"🔍 Лист статистики '{SHEET_STATS}': {'✅ НАЙДЕН' if SHEET_STATS in real_names else '❌ НЕ НАЙДЕН'}")
             return True
         except Exception as e:
             logger.error(f"❌ Google Sheets error: {e}", exc_info=True)
             return False
+
+    def ensure_headers(self):
+        """Проверяет и при необходимости создаёт заголовки в листе Контакты"""
+        try:
+            sheet = self.spreadsheet.worksheet(SHEET_CONTACTS)
+            first_row = sheet.row_values(1)
+            expected = ['Username', 'Имя', 'Фамилия', 'Телефон', 'Группа', 'Дата']
+            if first_row != expected:
+                sheet.insert_row(expected, index=1)
+                sheet.format('A1:F1', {'textFormat': {'bold': True}})
+                logger.info("✅ Заголовки созданы в листе Контакты")
+        except Exception as e:
+            logger.error(f"⚠️ Не удалось создать заголовки: {e}")
 
     def write_contacts(self, contacts: List[Dict]) -> bool:
         if not contacts:
@@ -127,72 +141,67 @@ class GoogleSheetsManager:
             return False
         try:
             if not self.spreadsheet:
-                raise RuntimeError("Spreadsheet не подключён (self.spreadsheet is None)")
+                raise RuntimeError("Spreadsheet не подключён")
 
             logger.info(f"📋 Открываю лист: '{SHEET_CONTACTS}'")
             sheet = self.spreadsheet.worksheet(SHEET_CONTACTS)
             logger.info(f"✅ Лист найден: {sheet.title}")
 
+            # Структура колонок: Username | Имя | Фамилия | Телефон | Группа | Дата
             rows = []
             for contact in contacts:
                 row = [
-                    contact.get('id', ''),
-                    contact.get('username', ''),
-                    contact.get('phone', ''),
-                    contact.get('first_name', ''),
-                    contact.get('last_name', ''),
-                    contact.get('group', ''),
-                    0, '', '',
-                    datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    contact.get('username', ''),                    # A: Username
+                    contact.get('first_name', ''),                  # B: Имя
+                    contact.get('last_name', ''),                   # C: Фамилия
+                    contact.get('phone', ''),                       # D: Телефон
+                    contact.get('group', ''),                       # E: Группа
+                    datetime.now().strftime('%Y-%m-%d %H:%M'),      # F: Дата
                 ]
                 rows.append(row)
 
-            logger.info(f"📝 Записываю {len(rows)} строк в Sheets...")
+            logger.info(f"📝 Записываю {len(rows)} строк...")
             sheet.append_rows(rows, value_input_option='USER_ENTERED')
-            logger.info(f"✅ Saved {len(contacts)} contacts to Google Sheets")
+            logger.info(f"✅ Сохранено {len(contacts)} контактов")
             return True
 
-        except gspread.exceptions.WorksheetNotFound as e:
-            msg = (
-                f"Лист '{SHEET_CONTACTS}' не найден в таблице.\n"
-                f"Открой Google Sheets и переименуй вкладку в: {SHEET_CONTACTS}\n"
-                f"Или посмотри в логах Render строку '📋 Реальные названия листов' и замени константу SHEET_CONTACTS в коде."
-            )
+        except gspread.exceptions.WorksheetNotFound:
+            msg = f"Лист '{SHEET_CONTACTS}' не найден. Переименуй вкладку в Google Sheets в: Контакты"
             logger.error(f"❌ WorksheetNotFound: {msg}")
-            raise RuntimeError(msg) from e
+            raise RuntimeError(msg)
 
-        except gspread.exceptions.SpreadsheetNotFound as e:
-            msg = f"Таблица с ID '{SPREADSHEET_ID}' не найдена. Проверь переменную SPREADSHEET_ID в Render."
+        except gspread.exceptions.SpreadsheetNotFound:
+            msg = f"Таблица с ID '{SPREADSHEET_ID}' не найдена. Проверь SPREADSHEET_ID в Render."
             logger.error(f"❌ SpreadsheetNotFound: {msg}")
-            raise RuntimeError(msg) from e
+            raise RuntimeError(msg)
 
         except gspread.exceptions.APIError as e:
-            msg = f"Google API вернул ошибку: {e.response.status_code} — {e.args[0]}"
+            msg = f"Google API ошибка: {e.response.status_code} — {e.args[0]}"
             logger.error(f"❌ APIError: {msg}")
-            raise RuntimeError(msg) from e
+            raise RuntimeError(msg)
 
         except Exception as e:
             msg = f"{type(e).__name__}: {str(e)}"
-            logger.error(f"❌ Неизвестная ошибка при записи в Sheets: {msg}", exc_info=True)
-            raise RuntimeError(msg) from e
+            logger.error(f"❌ Ошибка при записи: {msg}", exc_info=True)
+            raise RuntimeError(msg)
 
     def write_stats(self, stats: Dict):
         try:
             sheet = self.spreadsheet.worksheet(SHEET_STATS)
             row = [
-                datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                datetime.now().strftime('%Y-%m-%d %H:%M'),
                 stats.get('groups_parsed', 0),
                 stats.get('total_contacts', 0),
                 stats.get('with_username', 0),
                 stats.get('with_phone', 0),
+                stats.get('bots_skipped', 0),
                 stats.get('duration_sec', 0),
-                0
             ]
             sheet.append_row(row)
         except gspread.exceptions.WorksheetNotFound:
-            logger.error(f"❌ Лист статистики '{SHEET_STATS}' не найден. Создай вкладку с таким именем в таблице.")
+            logger.error(f"❌ Лист '{SHEET_STATS}' не найден. Создай вкладку 'Статистика' в таблице.")
         except Exception as e:
-            logger.error(f"❌ Error saving stats: {type(e).__name__}: {e}")
+            logger.error(f"❌ Ошибка записи статистики: {type(e).__name__}: {e}")
 
 
 sheets_manager = GoogleSheetsManager()
@@ -235,7 +244,6 @@ class TelegramParser:
             entity = await self.client.get_entity(group_link)
             entity_title = entity.title if hasattr(entity, 'title') else 'Unnamed'
             logger.info(f"✅ Got entity: {entity_title}")
-            logger.info(f"   Type: {'Channel' if hasattr(entity, 'broadcast') and entity.broadcast else 'Group'}")
 
             if hasattr(entity, 'broadcast') and entity.broadcast:
                 logger.info("📢 This is a CHANNEL, looking for discussion group...")
@@ -255,7 +263,7 @@ class TelegramParser:
             else:
                 logger.info("👥 This is a GROUP (not a channel)")
 
-            logger.info("📥 Requesting ALL participants from Telegram...")
+            logger.info("📥 Requesting participants from Telegram...")
             participants = await self.client.get_participants(entity)
             logger.info(f"✅ Telegram returned {len(participants)} total participants")
 
@@ -265,39 +273,48 @@ class TelegramParser:
 
             logger.info(f"🔄 Processing {len(participants)} participants...")
 
-            bots_count = 0
-            deleted_count = 0
+            bots_skipped = 0
+            deleted_skipped = 0
+            empty_skipped = 0
 
             for idx, user in enumerate(participants, 1):
+                # Пропускаем удалённые аккаунты
                 if user.deleted:
-                    deleted_count += 1
+                    deleted_skipped += 1
                     continue
 
+                # Пропускаем ботов — они не нужны
                 if user.bot:
-                    bots_count += 1
+                    bots_skipped += 1
+                    continue
+
+                # Пропускаем совсем пустые аккаунты (нет ни username ни имени)
+                if not user.username and not user.first_name:
+                    empty_skipped += 1
+                    continue
 
                 contact = {
-                    'id': user.id,
                     'username': f"@{user.username}" if user.username else "",
-                    'phone': f"+{user.phone}" if user.phone else "",
                     'first_name': user.first_name or "",
                     'last_name': user.last_name or "",
+                    'phone': f"+{user.phone}" if user.phone else "",
                     'group': group_link,
                 }
                 contacts.append(contact)
 
                 if idx % 100 == 0:
-                    logger.info(f"   📦 Processed {idx}/{len(participants)} participants...")
+                    logger.info(f"   📦 Processed {idx}/{len(participants)}...")
 
                 await asyncio.sleep(0.05)
 
             logger.info("=" * 60)
             logger.info(f"✅ PARSING COMPLETE!")
-            logger.info(f"   📊 Total collected: {len(contacts)} contacts")
-            logger.info(f"   🤖 Bots found: {bots_count}")
-            logger.info(f"   🗑️ Deleted accounts skipped: {deleted_count}")
-            logger.info(f"   👤 With username: {sum(1 for c in contacts if c['username'])}")
-            logger.info(f"   📱 With phone: {sum(1 for c in contacts if c['phone'])}")
+            logger.info(f"   📊 Полезных контактов: {len(contacts)}")
+            logger.info(f"   🤖 Ботов пропущено: {bots_skipped}")
+            logger.info(f"   🗑️ Удалённых аккаунтов: {deleted_skipped}")
+            logger.info(f"   👻 Пустых аккаунтов: {empty_skipped}")
+            logger.info(f"   👤 С username: {sum(1 for c in contacts if c['username'])}")
+            logger.info(f"   📱 С телефоном: {sum(1 for c in contacts if c['phone'])}")
             logger.info("=" * 60)
 
         except Exception as e:
@@ -327,7 +344,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Привет! Я парсер Telegram групп.\n\n"
         "Команда: /parse @groupname\n"
-        "Пример: /parse @python"
+        "Пример: /parse @python\n\n"
+        "Можно несколько групп сразу:\n"
+        "/parse @group1 @group2 @group3\n\n"
+        "Боты и удалённые аккаунты фильтруются автоматически."
     )
 
 
@@ -342,18 +362,21 @@ async def parse_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     groups = [g.strip() for g in groups_str.replace(',', ' ').split() if g.strip()]
 
     if len(groups) > MAX_GROUPS_PER_RUN:
-        await update.message.reply_text(f"⚠️ Максимум {MAX_GROUPS_PER_RUN} групп!")
+        await update.message.reply_text(f"⚠️ Максимум {MAX_GROUPS_PER_RUN} групп за раз!")
         return
 
     criteria = get_user_criteria(user_id)
 
     keyboard = [
-        [InlineKeyboardButton(f"📊 Контактов: {criteria['max_contacts']}", callback_data="adj")],
+        [InlineKeyboardButton(f"📊 Лимит: {criteria['max_contacts']} контактов", callback_data="adj")],
         [InlineKeyboardButton("🚀 ПАРСИТЬ!", callback_data=f"go:{','.join(groups)}")],
     ]
 
     await update.message.reply_text(
-        f"📋 Настройки:\n📊 Макс. контактов: {criteria['max_contacts']}\n\nГруппы: {', '.join(groups)}",
+        f"📋 Настройки парсинга:\n"
+        f"📊 Макс. контактов: {criteria['max_contacts']}\n"
+        f"🚫 Боты: фильтруются автоматически\n\n"
+        f"Группы: {', '.join(groups)}",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -368,6 +391,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         groups_str = data.split(":", 1)[1]
         groups = [g.strip() for g in groups_str.split(',')]
         await do_parsing(query, user_id, groups)
+
     elif data == "adj":
         criteria = get_user_criteria(user_id)
         new_val = 1000 if criteria['max_contacts'] >= 10000 else criteria['max_contacts'] + 1000
@@ -378,12 +402,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         groups_str = groups_line[0].split(':', 1)[1].strip() if groups_line else ""
 
         keyboard = [
-            [InlineKeyboardButton(f"📊 Контактов: {new_val}", callback_data="adj")],
+            [InlineKeyboardButton(f"📊 Лимит: {new_val} контактов", callback_data="adj")],
             [InlineKeyboardButton("🚀 ПАРСИТЬ!", callback_data=f"go:{groups_str}")],
         ]
 
         await query.edit_message_text(
-            f"📋 Настройки:\n📊 Макс. контактов: {new_val}\n\nГруппы: {groups_str}",
+            f"📋 Настройки парсинга:\n"
+            f"📊 Макс. контактов: {new_val}\n"
+            f"🚫 Боты: фильтруются автоматически\n\n"
+            f"Группы: {groups_str}",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
@@ -392,8 +419,7 @@ async def do_parsing(query, user_id: int, groups: List[str]):
     logger.info("#" * 60)
     logger.info("🚀 PARSING SESSION STARTED")
     logger.info(f"👤 User ID: {user_id}")
-    logger.info(f"📝 Groups to parse: {len(groups)}")
-    logger.info(f"📋 Groups: {', '.join(groups)}")
+    logger.info(f"📝 Groups: {', '.join(groups)}")
     logger.info("#" * 60)
 
     await query.edit_message_text("🚀 Подключаюсь к Telegram...")
@@ -427,77 +453,81 @@ async def do_parsing(query, user_id: int, groups: List[str]):
             all_contacts.extend(contacts)
 
             logger.info(f"➕ Added {len(contacts)} contacts from {group}")
-            logger.info(f"📊 Total contacts so far: {len(all_contacts)}")
+            logger.info(f"📊 Total so far: {len(all_contacts)}")
 
             await query.edit_message_text(
-                f"✅ {group}: {len(contacts)} контактов\n📊 Всего: {len(all_contacts)}"
+                f"✅ {group}: {len(contacts)} контактов\n"
+                f"📊 Всего собрано: {len(all_contacts)}"
             )
 
             if idx < len(groups):
                 delay = random.uniform(DELAY_MIN, DELAY_MAX)
-                logger.info(f"⏳ Waiting {delay:.1f} seconds before next group...")
+                logger.info(f"⏳ Waiting {delay:.1f}s...")
                 await asyncio.sleep(delay)
 
         if all_contacts:
-            logger.info("💾 Saving contacts to Google Sheets...")
+            logger.info("💾 Saving to Google Sheets...")
             await query.edit_message_text("💾 Сохраняю в Google Sheets...")
 
             sheets_ok = False
             try:
+                sheets_manager.ensure_headers()
                 sheets_ok = sheets_manager.write_contacts(all_contacts)
             except RuntimeError as e:
-                # Показываем реальную ошибку прямо в Telegram
                 error_text = (
                     f"⚠️ Контакты собраны ({len(all_contacts)} шт), "
-                    f"но запись в Google Sheets провалилась!\n\n"
+                    f"но запись в Google Sheets не удалась!\n\n"
                     f"❌ Причина:\n<code>{str(e)}</code>\n\n"
-                    f"Что делать:\n"
-                    f"1. Открой Google Sheets\n"
-                    f"2. Посмотри как называются вкладки (листы)\n"
-                    f"3. Переименуй их в: <code>Контакты</code> и <code>Статистика</code>\n"
-                    f"4. Или посмотри в логах Render строку '📋 Реальные названия листов'"
+                    f"Что сделать: открой Google Sheets и убедись что вкладка называется точно <code>Контакты</code>"
                 )
                 await query.edit_message_text(error_text, parse_mode="HTML")
                 logger.error(f"Sheets write failed: {e}")
-                return  # не показываем ложный успех
+                return
 
             if sheets_ok:
+                duration = int(time.time() - start_time)
                 stats = {
                     'groups_parsed': len(groups),
                     'total_contacts': len(all_contacts),
                     'with_username': sum(1 for c in all_contacts if c.get('username')),
                     'with_phone': sum(1 for c in all_contacts if c.get('phone')),
-                    'duration_sec': int(time.time() - start_time),
+                    'bots_skipped': 0,
+                    'duration_sec': duration,
                 }
                 sheets_manager.write_stats(stats)
+
+                result = (
+                    f"✅ Парсинг завершён!\n\n"
+                    f"📊 Результаты:\n"
+                    f"• Групп: {len(groups)}\n"
+                    f"• Контактов записано: {len(all_contacts)}\n"
+                    f"• С username: {sum(1 for c in all_contacts if c.get('username'))}\n"
+                    f"• С телефоном: {sum(1 for c in all_contacts if c.get('phone'))}\n"
+                    f"• Время: {duration} сек\n\n"
+                    f"📋 Данные в Google Sheets!"
+                )
+                await query.edit_message_text(result)
         else:
-            logger.warning("⚠️ No contacts collected!")
-
-        result = (
-            f"✅ Парсинг завершён!\n\n"
-            f"📊 Результаты:\n"
-            f"• Групп: {len(groups)}\n"
-            f"• Контактов: {len(all_contacts)}\n"
-            f"• С username: {sum(1 for c in all_contacts if c.get('username'))}\n"
-            f"• С телефоном: {sum(1 for c in all_contacts if c.get('phone'))}\n\n"
-            f"📋 Данные в Google Sheets!"
-        )
-
-        await query.edit_message_text(result)
+            await query.edit_message_text(
+                "⚠️ Парсинг завершён, но контактов не найдено.\n\n"
+                "Возможные причины:\n"
+                "• Группа закрытая или приватная\n"
+                "• В группе только боты\n"
+                "• Аккаунт не имеет доступа к участникам"
+            )
 
         logger.info("#" * 60)
-        logger.info("✅ PARSING SESSION COMPLETED SUCCESSFULLY")
-        logger.info(f"📊 Total contacts collected: {len(all_contacts)}")
-        logger.info(f"⏱️ Duration: {int(time.time() - start_time)} seconds")
+        logger.info("✅ PARSING SESSION COMPLETED")
+        logger.info(f"📊 Total contacts: {len(all_contacts)}")
+        logger.info(f"⏱️ Duration: {int(time.time() - start_time)}s")
         logger.info("#" * 60)
 
     except Exception as e:
         logger.error("!" * 60)
         logger.error("❌ CRITICAL ERROR in do_parsing")
-        logger.error(f"Error type: {type(e).__name__}")
-        logger.error(f"Error message: {str(e)}", exc_info=True)
+        logger.error(f"Error: {type(e).__name__}: {str(e)}", exc_info=True)
         logger.error("!" * 60)
-        await query.edit_message_text(f"❌ Ошибка: {str(e)}")
+        await query.edit_message_text(f"❌ Критическая ошибка: {str(e)}")
 
 
 # ─────────────────────────────────────────────
@@ -511,7 +541,6 @@ def main():
         logger.error("❌ Failed to connect to Google Sheets!")
         return
 
-    # Запускаем веб-сервер в фоновом daemon-потоке
     web_thread = threading.Thread(target=_run_web_server, daemon=True)
     web_thread.start()
 
@@ -522,9 +551,8 @@ def main():
     app.add_handler(CommandHandler("parse", parse_command))
     app.add_handler(CallbackQueryHandler(button_callback))
 
-    # Graceful shutdown при получении SIGTERM от Render
     def _handle_sigterm():
-        logger.warning("⚠️ SIGTERM получен — завершаю работу бота...")
+        logger.warning("⚠️ SIGTERM получен — завершаю работу...")
         asyncio.create_task(app.stop())
 
     loop = asyncio.new_event_loop()

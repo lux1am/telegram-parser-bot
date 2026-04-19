@@ -18,6 +18,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 from telethon import TelegramClient
+from telethon.sessions import StringSession
 from telethon.tl.functions.channels import GetFullChannelRequest
 
 import gspread
@@ -31,6 +32,7 @@ TELEGRAM_API_ID = int(os.getenv('TELEGRAM_API_ID'))
 TELEGRAM_API_HASH = os.getenv('TELEGRAM_API_HASH')
 TELEGRAM_PHONE = os.getenv('TELEGRAM_PHONE')
 SPREADSHEET_ID = os.getenv('SPREADSHEET_ID')
+STRING_SESSION = os.getenv('STRING_SESSION')
 
 SHEET_CONTACTS = "Контакты"
 SHEET_STATS = "Статистика"
@@ -76,7 +78,6 @@ async def _health(request):
 
 
 def _run_web_server():
-    """Запускает aiohttp в отдельном потоке с собственным event loop."""
     port = int(os.environ.get("PORT", 8080))
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -163,17 +164,19 @@ sheets_manager = GoogleSheetsManager()
 class TelegramParser:
     def __init__(self):
         self.client = None
-        self.loop = None
 
     async def connect(self):
         try:
             logger.info("🔌 Creating Telethon client...")
-            if not self.loop:
-                self.loop = asyncio.new_event_loop()
-
-            self.client = TelegramClient('bot_session', TELEGRAM_API_ID, TELEGRAM_API_HASH, loop=self.loop)
-            logger.info("🔑 Starting Telethon authentication...")
-            await self.client.start(phone=TELEGRAM_PHONE)
+            self.client = TelegramClient(
+                StringSession(STRING_SESSION),
+                TELEGRAM_API_ID,
+                TELEGRAM_API_HASH
+            )
+            await self.client.connect()
+            if not await self.client.is_user_authorized():
+                logger.error("❌ Telethon session is not authorized!")
+                return False
             logger.info("✅ Connected to Telegram via Telethon")
             return True
         except Exception as e:
@@ -442,9 +445,6 @@ async def do_parsing(query, user_id: int, groups: List[str]):
 # ─────────────────────────────────────────────
 
 def main():
-    import subprocess
-    subprocess.run(['python', 'decode_session.py'], check=False)
-
     logger.info("=" * 60)
     logger.info("🔗 Connecting to Google Sheets...")
     if not sheets_manager.connect():
@@ -467,7 +467,8 @@ def main():
         logger.warning("⚠️ SIGTERM получен — завершаю работу бота...")
         asyncio.create_task(app.stop())
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     loop.add_signal_handler(signal.SIGTERM, _handle_sigterm)
     loop.add_signal_handler(signal.SIGINT, _handle_sigterm)
 
@@ -475,8 +476,8 @@ def main():
     logger.info("=" * 60)
 
     app.run_polling(
-        drop_pending_updates=True,    # сбрасывает старую сессию getUpdates при старте
-        timeout=20,                   # таймаут long-polling
+        drop_pending_updates=True,
+        timeout=20,
         allowed_updates=Update.ALL_TYPES,
         close_loop=False,
     )

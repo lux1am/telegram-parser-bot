@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 import sys
 from typing import Any, Dict, List, Optional
 
@@ -36,7 +37,7 @@ TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
 
 GEMINI_GENERATE_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
-    "gemini-2.5-flash:generateContent"
+    "gemini-2.0-flash:generateContent"
 )
 
 MAX_HISTORY_TURNS = 30
@@ -269,6 +270,14 @@ async def assistant_main() -> None:
                     _trim_history(uid)
 
                     try:
+                        # Случайная пауза перед ответом (имитация человека)
+                        await asyncio.sleep(random.uniform(2, 5))
+
+                        # Статус "печатает" пропорционально длине ответа
+                        typing_time = min(len(reply) * 0.04, 8.0)
+                        async with client.action(event.chat_id, 'typing'):
+                            await asyncio.sleep(typing_time)
+
                         await event.respond(reply)
                     except Exception as e:
                         logger.exception("Failed to send Telegram reply user_id=%s: %s", uid, e)

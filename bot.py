@@ -7,8 +7,12 @@ import asyncio
 import time
 import random
 import logging
+import signal
+import threading
 from datetime import datetime
 from typing import List, Dict
+
+from aiohttp import web
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
@@ -50,21 +54,52 @@ logger = logging.getLogger(__name__)
 
 user_data = {}
 
+
 def get_user_criteria(user_id: int) -> Dict:
     if user_id not in user_data:
         user_data[user_id] = DEFAULT_CRITERIA.copy()
     return user_data[user_id]
+
 
 def update_user_criteria(user_id: int, key: str, value):
     if user_id not in user_data:
         user_data[user_id] = DEFAULT_CRITERIA.copy()
     user_data[user_id][key] = value
 
+
+# ─────────────────────────────────────────────
+# ФЕЙКОВЫЙ ВЕБ-СЕРВЕР для Render health-check
+# ─────────────────────────────────────────────
+
+async def _health(request):
+    return web.Response(text="OK")
+
+
+def _run_web_server():
+    """Запускает aiohttp в отдельном потоке с собственным event loop."""
+    port = int(os.environ.get("PORT", 8080))
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    app = web.Application()
+    app.router.add_get("/", _health)
+    app.router.add_get("/health", _health)
+    runner = web.AppRunner(app)
+    loop.run_until_complete(runner.setup())
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    loop.run_until_complete(site.start())
+    logger.info(f"Health-check сервер запущен на порту {port}")
+    loop.run_forever()
+
+
+# ─────────────────────────────────────────────
+# GOOGLE SHEETS
+# ─────────────────────────────────────────────
+
 class GoogleSheetsManager:
     def __init__(self):
         self.client = None
         self.spreadsheet = None
-    
+
     def connect(self):
         try:
             scopes = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
@@ -76,7 +111,7 @@ class GoogleSheetsManager:
         except Exception as e:
             logger.error(f"❌ Google Sheets error: {e}")
             return False
-    
+
     def write_contacts(self, contacts: List[Dict]):
         if not contacts:
             logger.warning("⚠️ No contacts to write")
@@ -100,7 +135,7 @@ class GoogleSheetsManager:
             logger.info(f"✅ Saved {len(contacts)} contacts to Google Sheets")
         except Exception as e:
             logger.error(f"❌ Error saving contacts: {e}")
-    
+
     def write_stats(self, stats: Dict):
         try:
             sheet = self.spreadsheet.worksheet(SHEET_STATS)
@@ -117,19 +152,25 @@ class GoogleSheetsManager:
         except Exception as e:
             logger.error(f"Error saving stats: {e}")
 
+
 sheets_manager = GoogleSheetsManager()
+
+
+# ─────────────────────────────────────────────
+# TELETHON ПАРСЕР
+# ─────────────────────────────────────────────
 
 class TelegramParser:
     def __init__(self):
         self.client = None
         self.loop = None
-    
+
     async def connect(self):
         try:
             logger.info("🔌 Creating Telethon client...")
             if not self.loop:
                 self.loop = asyncio.new_event_loop()
-            
+
             self.client = TelegramClient('bot_session', TELEGRAM_API_ID, TELEGRAM_API_HASH, loop=self.loop)
             logger.info("🔑 Starting Telethon authentication...")
             await self.client.start(phone=TELEGRAM_PHONE)
@@ -138,20 +179,20 @@ class TelegramParser:
         except Exception as e:
             logger.error(f"❌ Telegram connection error: {e}", exc_info=True)
             return False
-    
+
     async def parse_group(self, group_link: str, max_contacts: int) -> List[Dict]:
         contacts = []
-        logger.info("="*60)
+        logger.info("=" * 60)
         logger.info(f"🎯 PARSING GROUP: {group_link}")
         logger.info(f"📊 Max contacts limit: {max_contacts}")
-        
+
         try:
             logger.info(f"📡 Getting entity for {group_link}...")
             entity = await self.client.get_entity(group_link)
             entity_title = entity.title if hasattr(entity, 'title') else 'Unnamed'
             logger.info(f"✅ Got entity: {entity_title}")
             logger.info(f"   Type: {'Channel' if hasattr(entity, 'broadcast') and entity.broadcast else 'Group'}")
-            
+
             if hasattr(entity, 'broadcast') and entity.broadcast:
                 logger.info("📢 This is a CHANNEL, looking for discussion group...")
                 try:
@@ -169,28 +210,28 @@ class TelegramParser:
                     return []
             else:
                 logger.info("👥 This is a GROUP (not a channel)")
-            
+
             logger.info("📥 Requesting ALL participants from Telegram...")
             participants = await self.client.get_participants(entity)
             logger.info(f"✅ Telegram returned {len(participants)} total participants")
-            
+
             if len(participants) > max_contacts:
                 logger.info(f"✂️ Limiting to first {max_contacts} participants")
                 participants = participants[:max_contacts]
-            
+
             logger.info(f"🔄 Processing {len(participants)} participants...")
-            
+
             bots_count = 0
             deleted_count = 0
-            
+
             for idx, user in enumerate(participants, 1):
                 if user.deleted:
                     deleted_count += 1
                     continue
-                
+
                 if user.bot:
                     bots_count += 1
-                
+
                 contact = {
                     'id': user.id,
                     'username': f"@{user.username}" if user.username else "",
@@ -200,28 +241,28 @@ class TelegramParser:
                     'group': group_link,
                 }
                 contacts.append(contact)
-                
+
                 if idx % 100 == 0:
                     logger.info(f"   📦 Processed {idx}/{len(participants)} participants...")
-                
+
                 await asyncio.sleep(0.05)
-            
-            logger.info("="*60)
+
+            logger.info("=" * 60)
             logger.info(f"✅ PARSING COMPLETE!")
             logger.info(f"   📊 Total collected: {len(contacts)} contacts")
             logger.info(f"   🤖 Bots found: {bots_count}")
             logger.info(f"   🗑️ Deleted accounts skipped: {deleted_count}")
             logger.info(f"   👤 With username: {sum(1 for c in contacts if c['username'])}")
             logger.info(f"   📱 With phone: {sum(1 for c in contacts if c['phone'])}")
-            logger.info("="*60)
-            
+            logger.info("=" * 60)
+
         except Exception as e:
             logger.error(f"❌ CRITICAL ERROR parsing {group_link}:", exc_info=True)
             logger.error(f"   Error type: {type(e).__name__}")
             logger.error(f"   Error message: {str(e)}")
-        
+
         return contacts
-    
+
     async def disconnect(self):
         if self.client:
             try:
@@ -230,7 +271,13 @@ class TelegramParser:
             except Exception as e:
                 logger.error(f"Error disconnecting: {e}")
 
+
 parser = TelegramParser()
+
+
+# ─────────────────────────────────────────────
+# ХЭНДЛЕРЫ БОТА
+# ─────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -239,38 +286,40 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Пример: /parse @python"
     )
 
+
 async def parse_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    
+
     if not context.args:
         await update.message.reply_text("❌ Укажи группу!\n\nПример: /parse @groupname")
         return
-    
+
     groups_str = ' '.join(context.args)
     groups = [g.strip() for g in groups_str.replace(',', ' ').split() if g.strip()]
-    
+
     if len(groups) > MAX_GROUPS_PER_RUN:
         await update.message.reply_text(f"⚠️ Максимум {MAX_GROUPS_PER_RUN} групп!")
         return
-    
+
     criteria = get_user_criteria(user_id)
-    
+
     keyboard = [
         [InlineKeyboardButton(f"📊 Контактов: {criteria['max_contacts']}", callback_data="adj")],
         [InlineKeyboardButton("🚀 ПАРСИТЬ!", callback_data=f"go:{','.join(groups)}")],
     ]
-    
+
     await update.message.reply_text(
         f"📋 Настройки:\n📊 Макс. контактов: {criteria['max_contacts']}\n\nГруппы: {', '.join(groups)}",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
     data = query.data
-    
+
     if data.startswith("go:"):
         groups_str = data.split(":", 1)[1]
         groups = [g.strip() for g in groups_str.split(',')]
@@ -279,31 +328,32 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         criteria = get_user_criteria(user_id)
         new_val = 1000 if criteria['max_contacts'] >= 10000 else criteria['max_contacts'] + 1000
         update_user_criteria(user_id, 'max_contacts', new_val)
-        
+
         text = query.message.text
         groups_line = [l for l in text.split('\n') if 'Группы:' in l]
         groups_str = groups_line[0].split(':', 1)[1].strip() if groups_line else ""
-        
+
         keyboard = [
             [InlineKeyboardButton(f"📊 Контактов: {new_val}", callback_data="adj")],
             [InlineKeyboardButton("🚀 ПАРСИТЬ!", callback_data=f"go:{groups_str}")],
         ]
-        
+
         await query.edit_message_text(
             f"📋 Настройки:\n📊 Макс. контактов: {new_val}\n\nГруппы: {groups_str}",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
+
 async def do_parsing(query, user_id: int, groups: List[str]):
-    logger.info("#"*60)
+    logger.info("#" * 60)
     logger.info("🚀 PARSING SESSION STARTED")
     logger.info(f"👤 User ID: {user_id}")
     logger.info(f"📝 Groups to parse: {len(groups)}")
     logger.info(f"📋 Groups: {', '.join(groups)}")
-    logger.info("#"*60)
-    
+    logger.info("#" * 60)
+
     await query.edit_message_text("🚀 Подключаюсь к Telegram...")
-    
+
     try:
         if not parser.client or not parser.client.is_connected():
             logger.info("🔄 Reconnecting to Telegram...")
@@ -313,42 +363,42 @@ async def do_parsing(query, user_id: int, groups: List[str]):
                 except:
                     pass
             parser.client = None
-            
+
             if not await parser.connect():
                 await query.edit_message_text("❌ Ошибка подключения к Telegram!")
                 return
-        
+
         criteria = get_user_criteria(user_id)
         all_contacts = []
         start_time = time.time()
-        
+
         for idx, group in enumerate(groups, 1):
-            logger.info(f"\n{'~'*60}")
+            logger.info(f"\n{'~' * 60}")
             logger.info(f"📡 Parsing group {idx}/{len(groups)}: {group}")
-            logger.info(f"{'~'*60}")
-            
+            logger.info(f"{'~' * 60}")
+
             await query.edit_message_text(f"📡 Парсинг {idx}/{len(groups)}: {group}...")
-            
+
             contacts = await parser.parse_group(group, criteria['max_contacts'])
             all_contacts.extend(contacts)
-            
+
             logger.info(f"➕ Added {len(contacts)} contacts from {group}")
             logger.info(f"📊 Total contacts so far: {len(all_contacts)}")
-            
+
             await query.edit_message_text(
                 f"✅ {group}: {len(contacts)} контактов\n📊 Всего: {len(all_contacts)}"
             )
-            
+
             if idx < len(groups):
                 delay = random.uniform(DELAY_MIN, DELAY_MAX)
                 logger.info(f"⏳ Waiting {delay:.1f} seconds before next group...")
                 await asyncio.sleep(delay)
-        
+
         if all_contacts:
             logger.info("💾 Saving contacts to Google Sheets...")
             await query.edit_message_text("💾 Сохраняю в Google Sheets...")
             sheets_manager.write_contacts(all_contacts)
-            
+
             stats = {
                 'groups_parsed': len(groups),
                 'total_contacts': len(all_contacts),
@@ -359,7 +409,7 @@ async def do_parsing(query, user_id: int, groups: List[str]):
             sheets_manager.write_stats(stats)
         else:
             logger.warning("⚠️ No contacts collected!")
-        
+
         result = (
             f"✅ Парсинг завершён!\n\n"
             f"📊 Результаты:\n"
@@ -369,44 +419,68 @@ async def do_parsing(query, user_id: int, groups: List[str]):
             f"• С телефоном: {sum(1 for c in all_contacts if c.get('phone'))}\n\n"
             f"📋 Данные в Google Sheets!"
         )
-        
+
         await query.edit_message_text(result)
-        
-        logger.info("#"*60)
+
+        logger.info("#" * 60)
         logger.info("✅ PARSING SESSION COMPLETED SUCCESSFULLY")
         logger.info(f"📊 Total contacts collected: {len(all_contacts)}")
         logger.info(f"⏱️ Duration: {int(time.time() - start_time)} seconds")
-        logger.info("#"*60)
-        
+        logger.info("#" * 60)
+
     except Exception as e:
-        logger.error("!"*60)
+        logger.error("!" * 60)
         logger.error("❌ CRITICAL ERROR in do_parsing")
         logger.error(f"Error type: {type(e).__name__}")
         logger.error(f"Error message: {str(e)}", exc_info=True)
-        logger.error("!"*60)
+        logger.error("!" * 60)
         await query.edit_message_text(f"❌ Ошибка: {str(e)}")
+
+
+# ─────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────
 
 def main():
     import subprocess
     subprocess.run(['python', 'decode_session.py'], check=False)
-    
-    logger.info("="*60)
+
+    logger.info("=" * 60)
     logger.info("🔗 Connecting to Google Sheets...")
     if not sheets_manager.connect():
         logger.error("❌ Failed to connect to Google Sheets!")
         return
-    
+
+    # Запускаем веб-сервер в фоновом daemon-потоке
+    web_thread = threading.Thread(target=_run_web_server, daemon=True)
+    web_thread.start()
+
     logger.info("🤖 Starting Telegram bot...")
     app = Application.builder().token(BOT_TOKEN).build()
-    
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("parse", parse_command))
     app.add_handler(CallbackQueryHandler(button_callback))
-    
+
+    # Graceful shutdown при получении SIGTERM от Render
+    def _handle_sigterm():
+        logger.warning("⚠️ SIGTERM получен — завершаю работу бота...")
+        asyncio.create_task(app.stop())
+
+    loop = asyncio.get_event_loop()
+    loop.add_signal_handler(signal.SIGTERM, _handle_sigterm)
+    loop.add_signal_handler(signal.SIGINT, _handle_sigterm)
+
     logger.info("✅ Bot is running and ready!")
-    logger.info("="*60)
-    
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    logger.info("=" * 60)
+
+    app.run_polling(
+        drop_pending_updates=True,    # сбрасывает старую сессию getUpdates при старте
+        timeout=20,                   # таймаут long-polling
+        allowed_updates=Update.ALL_TYPES,
+        close_loop=False,
+    )
+
 
 if __name__ == "__main__":
     main()

@@ -107,18 +107,32 @@ class GoogleSheetsManager:
             creds = Credentials.from_service_account_file('credentials.json', scopes=scopes)
             self.client = gspread.authorize(creds)
             self.spreadsheet = self.client.open_by_key(SPREADSHEET_ID)
-            logger.info("✅ Connected to Google Sheets")
+
+            # ← ДИАГНОСТИКА: показываем реальные названия листов в таблице
+            worksheets = self.spreadsheet.worksheets()
+            real_names = [ws.title for ws in worksheets]
+            logger.info(f"✅ Connected to Google Sheets: '{self.spreadsheet.title}'")
+            logger.info(f"📋 Реальные названия листов в таблице: {real_names}")
+            logger.info(f"🔍 Ищем лист контактов: '{SHEET_CONTACTS}' — {'✅ НАЙДЕН' if SHEET_CONTACTS in real_names else '❌ НЕ НАЙДЕН'}")
+            logger.info(f"🔍 Ищем лист статистики: '{SHEET_STATS}' — {'✅ НАЙДЕН' if SHEET_STATS in real_names else '❌ НЕ НАЙДЕН'}")
+
             return True
         except Exception as e:
-            logger.error(f"❌ Google Sheets error: {e}")
+            logger.error(f"❌ Google Sheets error: {e}", exc_info=True)
             return False
 
-    def write_contacts(self, contacts: List[Dict]):
+    def write_contacts(self, contacts: List[Dict]) -> bool:
         if not contacts:
             logger.warning("⚠️ No contacts to write")
-            return
+            return False
         try:
+            if not self.spreadsheet:
+                raise RuntimeError("Spreadsheet не подключён (self.spreadsheet is None)")
+
+            logger.info(f"📋 Открываю лист: '{SHEET_CONTACTS}'")
             sheet = self.spreadsheet.worksheet(SHEET_CONTACTS)
+            logger.info(f"✅ Лист найден: {sheet.title}")
+
             rows = []
             for contact in contacts:
                 row = [
@@ -132,10 +146,35 @@ class GoogleSheetsManager:
                     datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 ]
                 rows.append(row)
-            sheet.append_rows(rows)
+
+            logger.info(f"📝 Записываю {len(rows)} строк в Sheets...")
+            sheet.append_rows(rows, value_input_option='USER_ENTERED')
             logger.info(f"✅ Saved {len(contacts)} contacts to Google Sheets")
+            return True
+
+        except gspread.exceptions.WorksheetNotFound as e:
+            msg = (
+                f"Лист '{SHEET_CONTACTS}' не найден в таблице.\n"
+                f"Открой Google Sheets и переименуй вкладку в: {SHEET_CONTACTS}\n"
+                f"Или посмотри в логах Render строку '📋 Реальные названия листов' и замени константу SHEET_CONTACTS в коде."
+            )
+            logger.error(f"❌ WorksheetNotFound: {msg}")
+            raise RuntimeError(msg) from e
+
+        except gspread.exceptions.SpreadsheetNotFound as e:
+            msg = f"Таблица с ID '{SPREADSHEET_ID}' не найдена. Проверь переменную SPREADSHEET_ID в Render."
+            logger.error(f"❌ SpreadsheetNotFound: {msg}")
+            raise RuntimeError(msg) from e
+
+        except gspread.exceptions.APIError as e:
+            msg = f"Google API вернул ошибку: {e.response.status_code} — {e.args[0]}"
+            logger.error(f"❌ APIError: {msg}")
+            raise RuntimeError(msg) from e
+
         except Exception as e:
-            logger.error(f"❌ Error saving contacts: {e}")
+            msg = f"{type(e).__name__}: {str(e)}"
+            logger.error(f"❌ Неизвестная ошибка при записи в Sheets: {msg}", exc_info=True)
+            raise RuntimeError(msg) from e
 
     def write_stats(self, stats: Dict):
         try:
@@ -150,8 +189,10 @@ class GoogleSheetsManager:
                 0
             ]
             sheet.append_row(row)
+        except gspread.exceptions.WorksheetNotFound:
+            logger.error(f"❌ Лист статистики '{SHEET_STATS}' не найден. Создай вкладку с таким именем в таблице.")
         except Exception as e:
-            logger.error(f"Error saving stats: {e}")
+            logger.error(f"❌ Error saving stats: {type(e).__name__}: {e}")
 
 
 sheets_manager = GoogleSheetsManager()
@@ -400,16 +441,35 @@ async def do_parsing(query, user_id: int, groups: List[str]):
         if all_contacts:
             logger.info("💾 Saving contacts to Google Sheets...")
             await query.edit_message_text("💾 Сохраняю в Google Sheets...")
-            sheets_manager.write_contacts(all_contacts)
 
-            stats = {
-                'groups_parsed': len(groups),
-                'total_contacts': len(all_contacts),
-                'with_username': sum(1 for c in all_contacts if c.get('username')),
-                'with_phone': sum(1 for c in all_contacts if c.get('phone')),
-                'duration_sec': int(time.time() - start_time),
-            }
-            sheets_manager.write_stats(stats)
+            sheets_ok = False
+            try:
+                sheets_ok = sheets_manager.write_contacts(all_contacts)
+            except RuntimeError as e:
+                # Показываем реальную ошибку прямо в Telegram
+                error_text = (
+                    f"⚠️ Контакты собраны ({len(all_contacts)} шт), "
+                    f"но запись в Google Sheets провалилась!\n\n"
+                    f"❌ Причина:\n<code>{str(e)}</code>\n\n"
+                    f"Что делать:\n"
+                    f"1. Открой Google Sheets\n"
+                    f"2. Посмотри как называются вкладки (листы)\n"
+                    f"3. Переименуй их в: <code>Контакты</code> и <code>Статистика</code>\n"
+                    f"4. Или посмотри в логах Render строку '📋 Реальные названия листов'"
+                )
+                await query.edit_message_text(error_text, parse_mode="HTML")
+                logger.error(f"Sheets write failed: {e}")
+                return  # не показываем ложный успех
+
+            if sheets_ok:
+                stats = {
+                    'groups_parsed': len(groups),
+                    'total_contacts': len(all_contacts),
+                    'with_username': sum(1 for c in all_contacts if c.get('username')),
+                    'with_phone': sum(1 for c in all_contacts if c.get('phone')),
+                    'duration_sec': int(time.time() - start_time),
+                }
+                sheets_manager.write_stats(stats)
         else:
             logger.warning("⚠️ No contacts collected!")
 

@@ -7,7 +7,6 @@ import asyncio
 import time
 import random
 import logging
-import signal
 import threading
 from datetime import datetime
 from typing import List, Dict
@@ -534,7 +533,7 @@ async def do_parsing(query, user_id: int, groups: List[str]):
 # MAIN
 # ─────────────────────────────────────────────
 
-def _run_bot_polling():
+async def bot_main():
     logger.info("=" * 60)
     logger.info("🔗 Connecting to Google Sheets...")
     if not sheets_manager.connect():
@@ -551,28 +550,16 @@ def _run_bot_polling():
     app.add_handler(CommandHandler("parse", parse_command))
     app.add_handler(CallbackQueryHandler(button_callback))
 
-    def _handle_sigterm():
-        logger.warning("⚠️ SIGTERM получен — завершаю работу...")
-        asyncio.create_task(app.stop())
-
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.add_signal_handler(signal.SIGTERM, _handle_sigterm)
-    loop.add_signal_handler(signal.SIGINT, _handle_sigterm)
-
     logger.info("✅ Bot is running and ready!")
     logger.info("=" * 60)
 
-    app.run_polling(
+    await asyncio.to_thread(
+        app.run_polling,
         drop_pending_updates=True,
         timeout=20,
         allowed_updates=Update.ALL_TYPES,
         close_loop=False,
     )
-
-
-async def bot_main():
-    await asyncio.to_thread(_run_bot_polling)
 
 
 if __name__ == "__main__":

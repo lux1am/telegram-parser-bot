@@ -37,7 +37,7 @@ TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
 
 GEMINI_GENERATE_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
-    "gemini-2.0-flash:generateContent"
+    "gemini-2.5-flash:generateContent"
 )
 
 MAX_HISTORY_TURNS = 30

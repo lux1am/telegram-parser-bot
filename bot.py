@@ -433,8 +433,8 @@ async def outreach_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    username = context.args[0].replace("@", "").strip()
-    if not username:
+    usernames = [a.replace("@", "").strip() for a in context.args if a.strip()]
+    if not usernames:
         await update.message.reply_text("❌ Укажи username")
         return
 
@@ -449,144 +449,147 @@ async def outreach_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        today_count = _today_outreach_count()
-        if today_count >= 5:
-            await update.message.reply_text("⛔ Лимит на сегодня исчерпан (5/5). Попробуй завтра.")
-            return
-
-        try:
-            sheet = sheets_manager.spreadsheet.worksheet("Контакты")
-            cell = sheet.find(f"@{username}")
-            if cell:
-                # Проверяем колонку 7 (Статус)
-                status = sheet.cell(cell.row, 7).value
-                if status in ["Написали", "Диалог", "Горячий"]:
-                    await update.message.reply_text(
-                        f"⚠️ @{username} уже в работе. Статус: {status}\n"
-                        f"Пропускаю."
-                    )
-                    return
-        except Exception as e:
-            logger.warning(f"Could not check status for @{username}: {e}")
-
-        await update.message.reply_text(f"⏳ Готовлю сообщение для @{username}...")
-
-        # Генерируем первое сообщение через Gemini
-        try:
-            import httpx
-            gemini_url = (
-                "https://generativelanguage.googleapis.com/v1beta/models/"
-                "gemini-2.5-flash:generateContent"
-            )
-            gemini_key = os.getenv("GEMINI_API_KEY")
-
-            prompt = (
-                "Напиши ТОЛЬКО первое сообщение для начала диалога в Telegram. "
-                "Это должно быть простое приветствие — 'Добрый день' или 'Здравствуйте'. "
-                "Ничего больше. Никаких вопросов. Никакого представления. "
-                "Просто одно приветствие, как начинают живой разговор. "
-                "Максимум 2 слова."
-            )
-
-            payload = {
-                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                "generationConfig": {"maxOutputTokens": 20}
-            }
-
-            async with httpx.AsyncClient() as http:
-                resp = await http.post(
-                    gemini_url,
-                    params={"key": gemini_key},
-                    json=payload,
-                    timeout=30.0
+        total = len(usernames)
+        sent = 0
+        for idx, username in enumerate(usernames, start=1):
+            today_count = _today_outreach_count()
+            if today_count >= 5:
+                await update.message.reply_text(
+                    f"⛔ Лимит на сегодня исчерпан (5/5). Остановил рассылку. Отправлено: {sent} из {total}."
                 )
-                resp.raise_for_status()
-                data = resp.json()
-                first_message = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                break
 
-        except Exception as e:
-            logger.error(f"Gemini outreach error: {e}")
-            await update.message.reply_text(f"❌ Ошибка генерации сообщения: {e}")
-            return
+            try:
+                sheet = sheets_manager.spreadsheet.worksheet("Контакты")
+                cell = sheet.find(f"@{username}")
+                if cell:
+                    # Проверяем колонку 7 (Статус)
+                    status = sheet.cell(cell.row, 7).value
+                    if status in ["Написали", "Диалог", "Горячий"]:
+                        await update.message.reply_text(
+                            f"⚠️ @{username} уже в работе. Статус: {status}\n"
+                            f"Пропускаю."
+                        )
+                        continue
+            except Exception as e:
+                logger.warning(f"Could not check status for @{username}: {e}")
 
-        # Отправляем через продажный аккаунт Telethon
-        sales_client = None
-        try:
-            from telethon import TelegramClient
-            from telethon.sessions import StringSession
+            await update.message.reply_text(f"⏳ ({idx}/{total}) Готовлю сообщение для @{username}...")
 
-            sales_session = os.getenv("STRING_SESSION_SALES")
-            api_id = int(os.getenv("TELEGRAM_API_ID"))
-            api_hash = os.getenv("TELEGRAM_API_HASH")
+            # Генерируем первое сообщение через Gemini
+            try:
+                import httpx
+                gemini_url = (
+                    "https://generativelanguage.googleapis.com/v1beta/models/"
+                    "gemini-2.5-flash:generateContent"
+                )
+                gemini_key = os.getenv("GEMINI_API_KEY")
 
-            sales_client = TelegramClient(
-                StringSession(sales_session),
-                api_id,
-                api_hash
-            )
+                prompt = (
+                    "Напиши ТОЛЬКО первое сообщение для начала диалога в Telegram. "
+                    "Это должно быть простое приветствие — 'Добрый день' или 'Здравствуйте'. "
+                    "Ничего больше. Никаких вопросов. Никакого представления. "
+                    "Просто одно приветствие, как начинают живой разговор. "
+                    "Максимум 2 слова."
+                )
 
-            await sales_client.connect()
+                payload = {
+                    "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                    "generationConfig": {"maxOutputTokens": 20}
+                }
 
-            if not await sales_client.is_user_authorized():
-                await update.message.reply_text("❌ Продажный аккаунт не авторизован")
+                async with httpx.AsyncClient() as http:
+                    resp = await http.post(
+                        gemini_url,
+                        params={"key": gemini_key},
+                        json=payload,
+                        timeout=30.0
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    first_message = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+            except Exception as e:
+                logger.error(f"Gemini outreach error for @{username}: {e}")
+                await update.message.reply_text(f"❌ @{username}: ошибка генерации сообщения: {e}")
+                continue
+
+            # Отправляем через продажный аккаунт Telethon
+            sales_client = None
+            try:
+                from telethon import TelegramClient
+                from telethon.sessions import StringSession
+
+                sales_session = os.getenv("STRING_SESSION_SALES")
+                api_id = int(os.getenv("TELEGRAM_API_ID"))
+                api_hash = os.getenv("TELEGRAM_API_HASH")
+
+                sales_client = TelegramClient(
+                    StringSession(sales_session),
+                    api_id,
+                    api_hash
+                )
+
+                await sales_client.connect()
+
+                if not await sales_client.is_user_authorized():
+                    await update.message.reply_text("❌ Продажный аккаунт не авторизован")
+                    await sales_client.disconnect()
+                    break
+
+                # Задержка перед отправкой
+                import random
+                delay = random.uniform(5, 15)
+                await asyncio.sleep(delay)
+
+                # Статус "печатает"
+                async with sales_client.action(username, 'typing'):
+                    await asyncio.sleep(random.uniform(3, 6))
+
+                # Отправляем сообщение
+                await sales_client.send_message(username, first_message)
                 await sales_client.disconnect()
-                return
 
-            # Задержка перед отправкой
-            import random
-            delay = random.uniform(5, 15)
-            await asyncio.sleep(delay)
+                logger.info(f"Outreach sent to @{username}: {first_message}")
 
-            # Статус "печатает"
-            async with sales_client.action(username, 'typing'):
-                await asyncio.sleep(random.uniform(3, 6))
+            except UserPrivacyRestrictedError:
+                await update.message.reply_text(f"⚠️ @{username} закрыл личку")
+                if sales_client:
+                    await sales_client.disconnect()
+                continue
+            except FloodWaitError as e:
+                await update.message.reply_text(f"⏳ Telegram просит подождать {e.seconds} секунд")
+                if sales_client:
+                    await sales_client.disconnect()
+                continue
+            except UserIsBlockedError:
+                await update.message.reply_text(f"🚫 @{username} заблокировал аккаунт")
+                if sales_client:
+                    await sales_client.disconnect()
+                continue
+            except Exception as e:
+                logger.error(f"Telegram outreach error for @{username}: {e}")
+                await update.message.reply_text(f"❌ @{username}: ошибка отправки: {e}")
+                if sales_client:
+                    await sales_client.disconnect()
+                continue
 
-            # Отправляем сообщение
-            await sales_client.send_message(username, first_message)
-            await sales_client.disconnect()
+            # Записываем в Google Sheets
+            try:
+                sheet = sheets_manager.spreadsheet.worksheet("Контакты")
+                cell = sheet.find(f"@{username}")
+                if cell:
+                    sheet.update_cell(cell.row, 7, "Написали")
+                    sheet.update_cell(cell.row, 8, datetime.now().strftime('%Y-%m-%d %H:%M'))
+                logger.info(f"Updated sheets status for @{username}")
+            except Exception as e:
+                logger.warning(f"Could not update sheets for @{username}: {e}")
 
-            logger.info(f"Outreach sent to @{username}: {first_message}")
+            sent += 1
+            if idx < total:
+                await asyncio.sleep(random.uniform(300, 600))  # 5-10 минут между отправками
 
-        except UserPrivacyRestrictedError:
-            await update.message.reply_text(f"⚠️ @{username} закрыл личку")
-            if sales_client:
-                await sales_client.disconnect()
-            return
-        except FloodWaitError as e:
-            await update.message.reply_text(f"⏳ Telegram просит подождать {e.seconds} секунд")
-            if sales_client:
-                await sales_client.disconnect()
-            return
-        except UserIsBlockedError:
-            await update.message.reply_text(f"🚫 @{username} заблокировал аккаунт")
-            if sales_client:
-                await sales_client.disconnect()
-            return
-        except Exception as e:
-            logger.error(f"Telegram outreach error: {e}")
-            await update.message.reply_text(f"❌ Ошибка отправки: {e}")
-            if sales_client:
-                await sales_client.disconnect()
-            return
-
-        # Записываем в Google Sheets
-        try:
-            sheet = sheets_manager.spreadsheet.worksheet("Контакты")
-            # Ищем строку с этим username и обновляем статус
-            cell = sheet.find(f"@{username}")
-            if cell:
-                sheet.update_cell(cell.row, 7, "Написали")
-                sheet.update_cell(cell.row, 8, datetime.now().strftime('%Y-%m-%d %H:%M'))
-            logger.info(f"Updated sheets status for @{username}")
-        except Exception as e:
-            logger.warning(f"Could not update sheets for @{username}: {e}")
-
-        # Подтверждение тебе
-        await update.message.reply_text(
-            f"✅ Написал @{username}\n\n"
-            f"Сообщение:\n{first_message}\n\n"
-            f"Жду ответа — ассистент подхватит диалог автоматически."
-        )
+        await update.message.reply_text(f"✅ Outreach завершён. Написал {sent} из {total} контактов.")
 
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):

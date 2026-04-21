@@ -452,6 +452,11 @@ async def outreach_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total = len(usernames)
         sent = 0
         for idx, username in enumerate(usernames, start=1):
+            if not username or username.startswith('/') or len(username) < 2:
+                logger.warning(f"Skipping invalid username: {username}")
+                await update.message.reply_text(f"⚠️ Пропускаю невалидный username: {username}")
+                continue
+
             today_count = _today_outreach_count()
             if today_count >= 5:
                 await update.message.reply_text(
@@ -498,16 +503,34 @@ async def outreach_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "generationConfig": {"maxOutputTokens": 20}
                 }
 
+                first_message = ""
                 async with httpx.AsyncClient() as http:
-                    resp = await http.post(
-                        gemini_url,
-                        params={"key": gemini_key},
-                        json=payload,
-                        timeout=30.0
-                    )
-                    resp.raise_for_status()
-                    data = resp.json()
-                    first_message = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                    for attempt in range(3):
+                        try:
+                            resp = await http.post(
+                                gemini_url,
+                                params={"key": gemini_key},
+                                json=payload,
+                                timeout=30.0
+                            )
+                            resp.raise_for_status()
+                            data = resp.json()
+                            first_message = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                            if not first_message or len(first_message) < 2:
+                                first_message = "Добрый день"
+                            break
+                        except Exception as e:
+                            logger.warning(
+                                "Gemini attempt %s failed for @%s: %s",
+                                attempt + 1,
+                                username,
+                                e,
+                            )
+                            if attempt < 2:
+                                await asyncio.sleep(2)
+
+                if not first_message or len(first_message) < 2:
+                    first_message = "Добрый день"
 
             except Exception as e:
                 logger.error(f"Gemini outreach error for @{username}: {e}")
